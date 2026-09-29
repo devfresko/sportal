@@ -12589,13 +12589,13 @@
     }
 
 
-window._fkBootFailed = false;
-window._fkLoaded = true;
-if (window._fkSplashHardTimer) { clearTimeout(window._fkSplashHardTimer); window._fkSplashHardTimer = null; }
+    window._fkBootFailed = false;
+    window._fkLoaded = true;
+    if (window._fkSplashHardTimer) {clearTimeout(window._fkSplashHardTimer); window._fkSplashHardTimer = null;}
 
 
-window._fkLoaded = false;
-window._fkBootFailed = false;
+    window._fkLoaded = false;
+    window._fkBootFailed = false;
 
 
     function _bootApp() {
@@ -12749,42 +12749,25 @@ window._fkBootFailed = false;
       _applySbCollapseState();
       _bootNtfs();
 
+
       window._fkLoaded = false;
-      _gasX('getAllData', [], 35000, function (d) {
+      window._fkBootFailed = false;
+
+      // ── PHASE 1: Fast boot (dashboard + attendance status) ─────────────────────
+      // getDashboardStatsFresh already returns: dashStats, todayAtt, announcements, myDelegations
+      _gasX('getDashboardStatsFresh', [], 18000, function (d) {
         if (!d) {
-          // Empty response treated as failure
           _hideSplash();
           _showBootError('Empty response from server');
           return;
         }
 
-        // Cache everything in _D
+        // Cache critical data
         if (d.dashStats) _D.dashStats = d.dashStats;
         if (d.todayAtt) _D.todayAtt = d.todayAtt;
-        if (d.todayTasks) _D.todayTasks = d.todayTasks;
         if (d.announcements) _D.announcements = d.announcements;
-        if (d.leaveBalance) _D.leaveBalance = d.leaveBalance;
-        if (d.holidays) _D.holidays = d.holidays;
         if (d.myDelegations) _D.myDelegations = d.myDelegations;
-        if (d.empDir) _D.empDir = d.empDir;
-        if (d.celebrations) _D.celebrations = d.celebrations || [];
-        if (d.appConfig) {
-          _D.appConfig = d.appConfig;
-          if (d.appConfig.SESSION_HOURS) {
-            try {localStorage.setItem('fk_session_hours', String(parseInt(d.appConfig.SESSION_HOURS) || 12));} catch (e) { }
-          }
-          if (_U && _TOKEN) _saveSession(_U, _TOKEN);
-        }
-        if (_isManager && _isManager()) {
-          setTimeout(function () {
-            _gas('getAnalyticsSummary', [null], function (s) {_D.analyticsSummary = s;}, function () { });
-          }, 3000);
-        }
-        if (d.myAttendance) _D.myAttendance = d.myAttendance;
         _D.lastFetch = Date.now();
-
-        var stEl = document.getElementById('cacheState');
-        if (stEl) stEl.textContent = _cacheOk ? 'ON' : 'OFF';
 
         var badge = document.getElementById('annBadge');
         if (badge && d.announcements && d.announcements.length > 0) {
@@ -12792,27 +12775,92 @@ window._fkBootFailed = false;
           badge.style.display = '';
         }
 
-        // Success path
+        // Show UI immediately
+        window._fkBootFailed = false;
         window._fkLoaded = true;
+        if (window._fkSplashHardTimer) {
+          clearTimeout(window._fkSplashHardTimer);
+          window._fkSplashHardTimer = null;
+        }
         _hideSplash();
         _loadV(window._pwaStartRoute || 'dash');
         window._pwaStartRoute = null;
         if (_updateMobNav) _updateMobNav('home');
         _startAutoRefresh();
 
+        // ── PHASE 2: Background load (non-blocking) ─────────────────────────────
+        _bootLoadBackground();
+
       }, function (err) {
-        // Timeout / network error
         _hideSplash();
         _showBootError((err && err.message) ? err.message : 'Server se connect nahi ho pa raha');
       });
+
     }
+
+    /**
+     * After fast boot, load remaining data in background.
+     * Failures are silent — user already sees dashboard.
+     */
+    function _bootLoadBackground() {
+      // 1) AppConfig (session hours, GPS flags, etc.)
+      _gas('getAllAppConfigForFrontend', [], function (cfg) {
+        if (!cfg) return;
+        _D.appConfig = cfg;
+        if (cfg.SESSION_HOURS) {
+          try {
+            localStorage.setItem('fk_session_hours', String(parseInt(cfg.SESSION_HOURS, 10) || 12));
+          } catch (e) { }
+        }
+        if (_U && _TOKEN) _saveSession(_U, _TOKEN);
+      }, function () { });
+
+      // 2) Today's checklist tasks
+      _gas('getTodayTasks', [null, null], function (tasks) {
+        if (tasks) _D.todayTasks = tasks;
+      }, function () { });
+
+      // 3) Leave balance
+      _gas('getLeaveBalance', [], function (lb) {
+        if (lb) _D.leaveBalance = lb;
+      }, function () { });
+
+      // 4) Holidays (current year)
+      _gas('getHolidayList', [new Date().getFullYear()], function (h) {
+        if (h) _D.holidays = h;
+      }, function () { });
+
+      // 5) My attendance this month
+      var ym = (new Date()).toISOString().slice(0, 7);
+      _gas('getMyAttendance', [null, ym], function (att) {
+        if (att) _D.myAttendance = att;
+      }, function () { });
+
+      // 6) Celebrations
+      _gas('getTodayCelebrations', [], function (c) {
+        if (c) _D.celebrations = c;
+      }, function () { });
+
+      // 7) Manager-only: directory + analytics (delayed)
+      if (_isManager && _isManager()) {
+        _gas('getEmployeeDirectory', [], function (dir) {
+          if (dir) _D.empDir = dir;
+        }, function () { });
+        setTimeout(function () {
+          _gas('getAnalyticsSummary', [null], function (s) {
+            _D.analyticsSummary = s;
+          }, function () { });
+        }, 2500);
+      }
+    }
+
 
     /** Shared retry / logout error screen used by timeout + hard-timeout */
     function _showBootError(msg) {
 
       window._fkBootFailed = true;
-  if (window._fkTipTimer) { clearInterval(window._fkTipTimer); window._fkTipTimer = null; }
-  if (window._fkSplashHardTimer) { clearTimeout(window._fkSplashHardTimer); window._fkSplashHardTimer = null; }
+      if (window._fkTipTimer) {clearInterval(window._fkTipTimer); window._fkTipTimer = null;}
+      if (window._fkSplashHardTimer) {clearTimeout(window._fkSplashHardTimer); window._fkSplashHardTimer = null;}
 
       var ct = document.getElementById('content');
       if (!ct) return;
