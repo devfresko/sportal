@@ -12750,23 +12750,33 @@
       _bootNtfs();
 
 
+
+
+
+
       window._fkLoaded = false;
       window._fkBootFailed = false;
 
-      // ── PHASE 1: Fast boot (dashboard + attendance status) ─────────────────────
-      // getDashboardStatsFresh already returns: dashStats, todayAtt, announcements, myDelegations
-      _gasX('getDashboardStatsFresh', [], 18000, function (d) {
+      _gasX('getBootData', [], 30000, function (d) {
         if (!d) {
           _hideSplash();
           _showBootError('Empty response from server');
           return;
         }
 
-        // Cache critical data
         if (d.dashStats) _D.dashStats = d.dashStats;
         if (d.todayAtt) _D.todayAtt = d.todayAtt;
         if (d.announcements) _D.announcements = d.announcements;
         if (d.myDelegations) _D.myDelegations = d.myDelegations;
+        if (d.appConfig) {
+          _D.appConfig = d.appConfig;
+          if (d.appConfig.SESSION_HOURS) {
+            try {
+              localStorage.setItem('fk_session_hours', String(parseInt(d.appConfig.SESSION_HOURS, 10) || 12));
+            } catch (e) { }
+          }
+          if (_U && _TOKEN) _saveSession(_U, _TOKEN);
+        }
         _D.lastFetch = Date.now();
 
         var badge = document.getElementById('annBadge');
@@ -12775,7 +12785,6 @@
           badge.style.display = '';
         }
 
-        // Show UI immediately
         window._fkBootFailed = false;
         window._fkLoaded = true;
         if (window._fkSplashHardTimer) {
@@ -12788,12 +12797,39 @@
         if (_updateMobNav) _updateMobNav('home');
         _startAutoRefresh();
 
-        // ── PHASE 2: Background load (non-blocking) ─────────────────────────────
         _bootLoadBackground();
 
       }, function (err) {
+        // Fallback: agar getBootData unknown ho (purana deploy) to light path try
+        var msg = (err && err.message) ? err.message : '';
+        if (msg.indexOf('Unknown action') > -1) {
+          _gasX('getDashboardStatsFresh', [], 30000, function (d2) {
+            if (!d2) {_hideSplash(); _showBootError('Empty response'); return;}
+            if (d2.dashStats) _D.dashStats = d2.dashStats;
+            if (d2.todayAtt) _D.todayAtt = d2.todayAtt;
+            if (d2.announcements) _D.announcements = d2.announcements;
+            if (d2.myDelegations) _D.myDelegations = d2.myDelegations;
+            _D.lastFetch = Date.now();
+            window._fkLoaded = true;
+            window._fkBootFailed = false;
+            if (window._fkSplashHardTimer) {
+              clearTimeout(window._fkSplashHardTimer);
+              window._fkSplashHardTimer = null;
+            }
+            _hideSplash();
+            _loadV(window._pwaStartRoute || 'dash');
+            window._pwaStartRoute = null;
+            if (_updateMobNav) _updateMobNav('home');
+            _startAutoRefresh();
+            _bootLoadBackground();
+          }, function (e2) {
+            _hideSplash();
+            _showBootError((e2 && e2.message) ? e2.message : 'Server se connect nahi ho pa raha');
+          });
+          return;
+        }
         _hideSplash();
-        _showBootError((err && err.message) ? err.message : 'Server se connect nahi ho pa raha');
+        _showBootError(msg || 'Server se connect nahi ho pa raha');
       });
 
     }
