@@ -250,12 +250,13 @@ function _extractTimeStr(v) {
   if (v === '-') return '-';
 
   // ── Date object (Sheets time-formatted cell or corrupted time-only Date) ──
-  if (v instanceof Date) {
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && /Z|[+-]\d{2}:?\d{2}/.test(s)) {
     try {
-      return Utilities.formatDate(v, _getTimezone(), 'HH:mm');
-    } catch (e) {
-      return '';
-    }
+      var isoD = new Date(s);
+      if (!isNaN(isoD.getTime())) {
+        return Utilities.formatDate(isoD, 'Asia/Kolkata', 'HH:mm');
+      }
+    } catch (eIso) {}
   }
 
   // ── Number: Excel serial (full date+time or time-only fraction) ──────────
@@ -354,6 +355,35 @@ function _extractTimeStr(v) {
   return '';
 }
 
+/**
+ * Reliable punch times from a Daily-Attendance row.
+ * Prefer device_ts (full datetime text) over time-only cells (Date/UTC cache bugs).
+ * Always returns { check_in: 'HH:mm'|'-', check_out: 'HH:mm'|'-' }
+ */
+function _attTimesFromRow(r) {
+  if (!r) return { check_in: '-', check_out: '-' };
+
+  var ciDev = _extractTimeStr(r['check_in_device_ts'] || r['device_ts'] || '');
+  var coDev = _extractTimeStr(r['check_out_device_ts'] || '');
+  var ciMain = _extractTimeStr(r['check_in'] || r['check_in_ts'] || '');
+  var coMain = _extractTimeStr(r['check_out'] || r['check_out_ts'] || '');
+
+  // Prefer device timestamps when present
+  var ci = (ciDev && ciDev !== '-') ? ciDev : (ciMain && ciMain !== '-' ? ciMain : '-');
+  var co = (coDev && coDev !== '-') ? coDev : (coMain && coMain !== '-' ? coMain : '-');
+
+  // Guard: if IN is after OUT same day and IN looks like midnight junk (00:xx / 23:xx)
+  // while main column has a sane daytime value, prefer main
+  if (ci !== '-' && ciMain && ciMain !== '-' && ci !== ciMain) {
+    var ciH = parseInt(ci.split(':')[0], 10);
+    var mainH = parseInt(ciMain.split(':')[0], 10);
+    if ((ciH <= 1 || ciH >= 22) && mainH >= 6 && mainH <= 20) {
+      ci = ciMain;
+    }
+  }
+
+  return { check_in: ci || '-', check_out: co || '-' };
+}
 
 function _cfgLoad() {
   _cc = {};
@@ -518,9 +548,8 @@ function _clearSheetCache(sheetId, tabName) {
 function getSheetData(sheetId, tabName) {
   var _t0 = Date.now();
   try {
-    // Check cache first (skip for write-heavy tabs)
     var ttl = _CACHE_TTL[tabName];
-    if (ttl === undefined) ttl = 180; // default 3 min for unknown tabs
+    if (ttl === undefined) ttl = 180;
 
     var cacheKey = '';
     var cached = null;
@@ -537,7 +566,6 @@ function getSheetData(sheetId, tabName) {
       } catch (ce) { }
     }
 
-    // Read from sheet
     var ss = _getSpreadsheet(sheetId);
     var sh = ss.getSheetByName(tabName);
     if (!sh) { console.warn('[getSheetData] Tab not found: ' + tabName); return []; }
@@ -545,26 +573,47 @@ function getSheetData(sheetId, tabName) {
     if (lr < 2) return [];
     var lc = sh.getLastColumn();
     if (lc < 1) return [];
-    var data = sh.getRange(1, 1, lr, lc).getValues();
+
+    var rng = sh.getRange(1, 1, lr, lc);
+    var data = rng.getValues();
+    var disp = rng.getDisplayValues(); // "10:49" exactly as sheet UI
     var hdrs = data[0].map(function (h) { return String(h || '').trim(); });
     var res = [];
+
     for (var i = 1; i < data.length; i++) {
       var row = {}, hasData = false;
       for (var j = 0; j < hdrs.length; j++) {
-        if (hdrs[j]) {
-          row[hdrs[j]] = data[i][j];
-          if (data[i][j] !== '' && data[i][j] !== null && data[i][j] !== undefined) hasData = true;
+        if (!hdrs[j]) continue;
+        var raw = data[i][j];
+        var shown = disp[i][j];
+
+        if (Object.prototype.toString.call(raw) === '[object Date]' && !isNaN(raw.getTime())) {
+          // Prefer what user sees in Sheets (avoids UTC shift in Cache JSON)
+          if (shown && String(shown).trim() !== '') {
+            row[hdrs[j]] = String(shown).trim();
+          } else {
+            try {
+              row[hdrs[j]] = Utilities.formatDate(raw, 'Asia/Kolkata', 'yyyy-MM-dd HH:mm:ss');
+            } catch (eFmt) {
+              row[hdrs[j]] = String(raw);
+            }
+          }
+        } else {
+          row[hdrs[j]] = raw;
+        }
+
+        if (row[hdrs[j]] !== '' && row[hdrs[j]] !== null && row[hdrs[j]] !== undefined) {
+          hasData = true;
         }
       }
       if (hasData) res.push(row);
     }
 
-    // Store in cache
     if (ttl > 0 && cacheKey) {
       try {
         var str = JSON.stringify(res);
         if (str.length < 90000) CacheService.getScriptCache().put(cacheKey, str, ttl);
-      } catch (ce) { }
+      } catch (ce2) { }
     }
 
     console.log('[getSheetData] SHEET READ  ' + tabName + ' → ' + (Date.now() - _t0) + 'ms, rows=' + res.length);
@@ -973,16 +1022,12 @@ function getDashboardStats(passedUser) {
 function getTodayTasks(empId, date, passedUser) {
   var user = verifyUser(passedUser);
   if (!user) throw new Error('NOT_AUTHENTICATED');
-  var target = _normDateSafe(date) || getISTDate();
+  var target = date || getISTDate();
   var code = empId || _myCode(user);
   var isToday = (target === getISTDate());
-
-  var isHol = false;
-  try {
-    isHol = getSheetData(MASTER_SHEET_ID, 'Holiday List').some(function (h) {
-      return _normDateSafe(h['Date']) === target;
-    });
-  } catch (eH) {}
+  var isHol = getSheetData(MASTER_SHEET_ID, 'Holiday List').some(function (h) {
+    return _normDateSafe(h['Date']) === target;
+  });
 
   var ss = _getSpreadsheet(CHECKLIST_MASTER_ID);
   var sh = ss.getSheetByName(isToday ? 'Checklist_Today' : 'Checklist');
@@ -990,9 +1035,8 @@ function getTodayTasks(empId, date, passedUser) {
   var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
   if (lastRow < 2) return [];
 
-  var hdrs = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) {
-    return String(h || '').trim();
-  });
+  var data = sh.getRange(1, 1, lastRow, lastCol).getValues();
+  var hdrs = data[0].map(function (h) { return String(h || '').trim(); });
   var iNId = hdrs.indexOf('Name Id'), iPlnd = hdrs.indexOf('Planned');
   var iTsk = hdrs.indexOf('Task'), iStat = hdrs.indexOf('Status');
   var iAct = hdrs.indexOf('Actual'), iFreq = hdrs.indexOf('Freq');
@@ -1002,9 +1046,9 @@ function getTodayTasks(empId, date, passedUser) {
   var iTransBy = hdrs.indexOf('Transfer By');
   var iTransRea = hdrs.indexOf('Transfer Reason');
   var iRemark = hdrs.indexOf('Remark');
-  if (iNId < 0 || iPlnd < 0) return [];
 
-  // ── Task time map (small sheet — ok) ─────────────────────────────────────
+  // Build planned_time map from Task List's Day/Date column
+  // New format: "dd/MM/yyyy HH:mm:ss" e.g. "08/08/2026 14:00:00"
   var taskTimeMap = {};
   try {
     getSheetData(MASTER_SHEET_ID, 'Task List').forEach(function (tl) {
@@ -1012,114 +1056,84 @@ function getTodayTasks(empId, date, passedUser) {
       var rawDD = tl['Day/Date'];
       if (!uid) return;
       var timePart = '';
-      function _t12(h, m) {
-        var ap = h >= 12 ? 'PM' : 'AM';
-        return (h % 12 || 12) + ':' + (m < 10 ? '0' : '') + m + ' ' + ap;
-      }
+      function _t12(h, m) { var ap = h >= 12 ? 'PM' : 'AM'; return (h % 12 || 12) + ':' + (m < 10 ? '0' : '') + m + ' ' + ap; }
       if (rawDD instanceof Date) {
+        // Sheets parsed the value as a Date (old records without text format)
         timePart = _t12(rawDD.getHours(), rawDD.getMinutes());
       } else {
         var dd = String(rawDD || '').trim();
+        // NEW format: "dd/MM/yyyy HH:mm:ss" — extract HH:mm
         var ddmmMatch = dd.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
-        if (ddmmMatch) timePart = _t12(parseInt(ddmmMatch[4], 10), parseInt(ddmmMatch[5], 10));
+        if (ddmmMatch) {
+          timePart = _t12(parseInt(ddmmMatch[4], 10), parseInt(ddmmMatch[5], 10));
+        }
+        // ISO datetime "2026-03-31T18:30:00.000Z" (old records)
         else if (dd.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)) {
           var iso = new Date(dd);
           if (!isNaN(iso.getTime())) timePart = _t12(iso.getHours(), iso.getMinutes());
-        } else if (dd.match(/\d{4}\s+(\d{2}):(\d{2})/)) {
+        }
+        // Corrupted "Sat Dec 30 1899 13:00:00 GMT+..."
+        else if (dd.match(/\d{4}\s+(\d{2}):(\d{2})/)) {
           var gm = dd.match(/\d{4}\s+(\d{2}):(\d{2})/);
           timePart = _t12(parseInt(gm[1], 10), parseInt(gm[2], 10));
-        } else if (dd.indexOf(' · ') > -1) timePart = dd.substring(dd.indexOf(' · ') + 3).trim();
+        }
+        // Old "Daily · 1:00 PM" or "Monday · 10:30 AM" — extract after ·
+        else if (dd.indexOf(' · ') > -1) timePart = dd.substring(dd.indexOf(' · ') + 3).trim();
+        // Already "11:00 AM" or "11:00"
         else if (dd.match(/^\d{1,2}:\d{2}/)) timePart = dd;
       }
       if (timePart) taskTimeMap[uid] = timePart;
     });
-  } catch (eTm) {}
-
-  // ── FAST PATH: only scan Name Id + Planned (+ Transferred To) columns ────
-  // Full-width getValues on 50k-row Checklist was causing 25s+ timeouts.
-  var nRows = lastRow - 1;
-  var nameCol = sh.getRange(2, iNId + 1, nRows, 1).getValues();
-  var planCol = sh.getRange(2, iPlnd + 1, nRows, 1).getValues();
-  var transCol = iTransTo >= 0 ? sh.getRange(2, iTransTo + 1, nRows, 1).getValues() : null;
-
-  var matchRows = []; // 1-based sheet row numbers
-  for (var i = 0; i < nRows; i++) {
-    var nameId = String(nameCol[i][0] || '').trim();
-    var transTo = transCol ? String(transCol[i][0] || '').trim() : '';
-    if (nameId !== code && transTo !== code) continue;
-    var pd = _normDateSafe(planCol[i][0]);
-    if (pd !== target) continue;
-    matchRows.push(i + 2);
-  }
-
-  if (matchRows.length === 0) return [];
-
-  // ── Read only matching rows (full width) ─────────────────────────────────
-  // Group contiguous rows into blocks to minimize getRange calls
-  matchRows.sort(function (a, b) { return a - b; });
-  var blocks = [];
-  var bStart = matchRows[0], bEnd = matchRows[0];
-  for (var m = 1; m < matchRows.length; m++) {
-    if (matchRows[m] === bEnd + 1) {
-      bEnd = matchRows[m];
-    } else {
-      blocks.push([bStart, bEnd]);
-      bStart = bEnd = matchRows[m];
-    }
-  }
-  blocks.push([bStart, bEnd]);
-
-  var rowSet = {};
-  matchRows.forEach(function (r) { rowSet[r] = true; });
+  } catch (eTm) { }
 
   var out = [];
   var occCount = {};
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var nameId = iNId >= 0 ? String(row[iNId] || '').trim() : '';
+    var transTo = iTransTo >= 0 ? String(row[iTransTo] || '').trim() : '';
+    var rowDate = iPlnd >= 0 ? _normDateSafe(row[iPlnd]) : '';
 
-  blocks.forEach(function (blk) {
-    var r0 = blk[0], r1 = blk[1];
-    var blockData = sh.getRange(r0, 1, r1 - r0 + 1, lastCol).getValues();
-    for (var bi = 0; bi < blockData.length; bi++) {
-      var absRow = r0 + bi;
-      if (!rowSet[absRow]) continue;
-      var row = blockData[bi];
-      var nameId = iNId >= 0 ? String(row[iNId] || '').trim() : '';
-      var transTo = iTransTo >= 0 ? String(row[iTransTo] || '').trim() : '';
-      var rowDate = iPlnd >= 0 ? _normDateSafe(row[iPlnd]) : target;
-      var st = iStat >= 0 ? String(row[iStat] || '').trim() : '';
-      var taskUid = '';
-      if (iTid >= 0 && row[iTid]) taskUid = String(row[iTid]).trim();
-      else if (iUID >= 0 && row[iUID]) taskUid = String(row[iUID]).trim();
+    if (rowDate && rowDate !== target) continue; // always filter by date (Checklist_Today has full week)
 
-      var occKey = taskUid || (iTsk >= 0 ? String(row[iTsk] || '') : '') || String(absRow);
-      var occ = occCount[occKey] || 0;
-      occCount[occKey] = occ + 1;
+    var isOwn = nameId === String(code);
+    // Task received by me = Name Id is mine AND Transferred To is also mine (task routed to me)
+    var isReceived = isOwn && !!transTo && transTo === String(code);
+    // Task sent away by me = Name Id is mine AND Transferred To is SOMEONE ELSE
+    var isTransOut = isOwn && !!transTo && transTo !== String(code);
 
-      var isTransOut = (nameId === code && transTo && transTo !== code);
-      var isReceived = (transTo === code && nameId !== code);
-      var isFromSomeone = isReceived;
+    // Show this task if: (a) it's mine OR (b) it was transferred FROM someone else TO me
+    var isMine = isOwn;
+    var isFromSomeone = !isOwn && transTo === String(code);
+    if (!isMine && !isFromSomeone) continue;
 
-      out.push({
-        row_num: absRow,
-        occ: occ,
-        task_uid: taskUid,
-        task_name: iTsk >= 0 ? String(row[iTsk] || '') : '',
-        frequency: iFreq >= 0 ? String(row[iFreq] || '') : '',
-        emp_id: nameId,
-        planned: rowDate || target,
-        status: st || (isHol ? 'Holiday' : 'Pending'),
-        actual: iAct >= 0 ? String(row[iAct] || '') : '',
-        transferred_to: transTo,
-        transferred_at: iTransAt >= 0 ? String(row[iTransAt] || '') : '',
-        transfer_by: iTransBy >= 0 ? String(row[iTransBy] || '') : '',
-        transfer_reason: iTransRea >= 0 ? String(row[iTransRea] || '') : '',
-        is_transferred: isTransOut,
-        is_received: isReceived || isFromSomeone,
-        remark: iRemark >= 0 ? String(row[iRemark] || '') : '',
-        scheduled_time: taskTimeMap[taskUid] || taskTimeMap[(taskUid || '').split('_')[0]] || ''
-      });
-    }
-  });
+    var taskName = iTsk >= 0 ? String(row[iTsk] || '').trim() : '';
+    var taskUid = (iTid >= 0 ? String(row[iTid] || '') : '') || (iUID >= 0 ? String(row[iUID] || '') : '');
+    var occKey = nameId + '|' + taskName;
+    var occ = occCount[occKey] || 0;
+    occCount[occKey] = occ + 1;
 
+    var st = iStat >= 0 ? String(row[iStat] || '').trim() : '';
+    out.push({
+      row_num: i + 1,
+      occ: occ,
+      task_uid: taskUid,
+      task_name: taskName,
+      frequency: iFreq >= 0 ? String(row[iFreq] || '') : '',
+      emp_id: nameId,
+      planned: rowDate || target,
+      status: st || (isHol ? 'Holiday' : 'Pending'),
+      actual: iAct >= 0 ? String(row[iAct] || '') : '',
+      transferred_to: transTo,
+      transferred_at: iTransAt >= 0 ? String(row[iTransAt] || '') : '',
+      transfer_by: iTransBy >= 0 ? String(row[iTransBy] || '') : '',
+      transfer_reason: iTransRea >= 0 ? String(row[iTransRea] || '') : '',
+      is_transferred: isTransOut,  // I sent this away → no Done button, orange badge
+      is_received: isReceived || isFromSomeone,  // came TO me → Done button, purple badge
+      remark: iRemark >= 0 ? String(row[iRemark] || '') : '',
+      scheduled_time: taskTimeMap[taskUid] || taskTimeMap[(taskUid || '').split('_')[0]] || ''
+    });
+  }
   return out;
 }
 
@@ -2755,19 +2769,10 @@ function getMyAttendance(empId, monthYear, passedUser) {
   var sum = { full_days: 0, half_days: 0, absent: 0, holiday: 0, week_off: 0 };
 
   var records = recs.map(function (r) {
-    var ci = _extractTimeStr(r['check_in']);
-    var co = _extractTimeStr(r['check_out']);
-    // Fallback to device timestamps if main columns empty/corrupt
-    if (!ci || ci === '-') {
-      var ciDev = _extractTimeStr(r['check_in_device_ts'] || r['device_ts'] || '');
-      if (ciDev && ciDev !== '-') ci = ciDev;
-    }
-    if (!co || co === '-') {
-      var coDev = _extractTimeStr(r['check_out_device_ts'] || '');
-      if (coDev && coDev !== '-') co = coDev;
-    }
-    if (!ci) ci = '-';
-    if (!co) co = '-';
+    // ✅ Single helper — device_ts preferred, display-safe times
+    var times = _attTimesFromRow(r);
+    var ci = times.check_in;
+    var co = times.check_out;
 
     // Recalculate total hours from actual check_in/check_out times
     var calculatedHours = '-';
@@ -2775,17 +2780,19 @@ function getMyAttendance(empId, monthYear, passedUser) {
     if (ci && ci !== '-' && co && co !== '-') {
       try {
         var ciP = ci.split(':'), coP = co.split(':');
-        var diff = (parseInt(coP[0]) * 60 + parseInt(coP[1])) - (parseInt(ciP[0]) * 60 + parseInt(ciP[1]));
+        var diff = (parseInt(coP[0], 10) * 60 + parseInt(coP[1], 10)) -
+                   (parseInt(ciP[0], 10) * 60 + parseInt(ciP[1], 10));
         if (diff > 0) {
           calculatedHrsNum = diff / 60;
-          calculatedHours = Math.floor(diff / 60) + 'h ' + (diff % 60 < 10 ? '0' : '') + (diff % 60) + 'm';
+          calculatedHours = Math.floor(diff / 60) + 'h ' +
+            (diff % 60 < 10 ? '0' : '') + (diff % 60) + 'm';
         }
       } catch (e) { }
     }
     if (calculatedHours === '-') {
       var th = r['total_hours'];
       if (th && th !== '-') {
-        if (th instanceof Date) {
+        if (Object.prototype.toString.call(th) === '[object Date]' && !isNaN(th.getTime())) {
           calculatedHours = Utilities.formatDate(th, 'Asia/Kolkata', 'HH:mm');
         } else {
           var s2 = String(th).trim();
@@ -2802,16 +2809,18 @@ function getMyAttendance(empId, monthYear, passedUser) {
     // Derive final status using per-employee Doer List threshold
     var rawStatus = String(r['status'] || '').trim();
     var st = _normAttStatus(rawStatus);
-    // Re-derive P/HD from actual hours whenever available
     if ((st === 'P' || st === 'HD') && calculatedHrsNum > 0) {
       st = calculatedHrsNum >= fullDayThreshHrs ? 'P' : 'HD';
     } else if (!rawStatus || st === 'A') {
       if (ci && ci !== '-') st = 'P';
     }
-    // Map back to display labels
-    var statusLabel = st === 'P' ? 'Present' : st === 'HD' ? 'Half Day' : st === 'A' ? 'Absent' : st === 'H' ? 'Holiday' : st === 'WO' ? 'Week Off' : rawStatus || '-';
+    var statusLabel = st === 'P' ? 'Present'
+      : st === 'HD' ? 'Half Day'
+      : st === 'A' ? 'Absent'
+      : st === 'H' ? 'Holiday'
+      : st === 'WO' ? 'Week Off'
+      : (rawStatus || '-');
 
-    // Accumulate summary
     if (st === 'P') sum.full_days++;
     else if (st === 'HD') sum.half_days++;
     else if (st === 'A') sum.absent++;
@@ -6544,44 +6553,71 @@ function getTodayAttendanceStatus(passedUser) {
   var today = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd');
 
   var rows = [];
-  try { rows = getSheetData(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance'); }
-  catch (e) { return { status: 'not_checked_in', check_in_ts: '', check_out_ts: '', total_hours: '-', att_id: '' }; }
+  try {
+    rows = getSheetData(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance');
+  } catch (e) {
+    return {
+      status: 'not_checked_in',
+      check_in: '', check_out: '',
+      check_in_ts: '', check_out_ts: '',
+      total_hours: '-', att_id: ''
+    };
+  }
 
   var rec = null;
   for (var i = 0; i < rows.length; i++) {
     if (String(rows[i]['emp_id'] || '') === empCode &&
-      _normDateSafe(rows[i]['date']) === today) {
-      rec = rows[i]; break;
+        _normDateSafe(rows[i]['date']) === today) {
+      rec = rows[i];
+      break;
     }
   }
 
-  if (!rec) return { status: 'not_checked_in', check_in_ts: '', check_out_ts: '', total_hours: '-', att_id: '' };
+  if (!rec) {
+    return {
+      status: 'not_checked_in',
+      check_in: '', check_out: '',
+      check_in_ts: '', check_out_ts: '',
+      total_hours: '-', att_id: ''
+    };
+  }
 
-  // Normalize via universal helper (handles Date, serial, AppSheet, 1899, AM/PM…)
-  var ciTime = _extractTimeStr(rec['check_in']);
-  var coTime = _extractTimeStr(rec['check_out']);
-  // Prefer device_ts if check_in column empty/corrupt
-  if (!ciTime || ciTime === '-') {
-    var fromDevice = _extractTimeStr(rec['check_in_device_ts'] || rec['device_ts'] || '');
-    if (fromDevice && fromDevice !== '-') ciTime = fromDevice;
-  }
-  if (!coTime || coTime === '-') {
-    var fromDeviceOut = _extractTimeStr(rec['check_out_device_ts'] || '');
-    if (fromDeviceOut && fromDeviceOut !== '-') coTime = fromDeviceOut;
-  }
+  // ✅ Single helper
+  var times = _attTimesFromRow(rec);
+  var ciTime = (times.check_in && times.check_in !== '-') ? times.check_in : '';
+  var coTime = (times.check_out && times.check_out !== '-') ? times.check_out : '';
 
   var th = String(rec['total_hours'] || '-').trim();
-  if (th instanceof Date || (typeof rec['total_hours'] === 'number')) {
-    // total_hours sometimes stored as duration serial — leave display to frontend if weird
+  if (Object.prototype.toString.call(rec['total_hours']) === '[object Date]' ||
+      typeof rec['total_hours'] === 'number') {
     th = String(rec['total_hours']);
   }
 
-  var ciTs = (ciTime && ciTime !== '-') ? (today + ' ' + ciTime + ':00') : '';
-  var coTs = (coTime && coTime !== '-') ? (today + ' ' + coTime + ':00') : '';
+  var ciTs = ciTime ? (today + ' ' + ciTime + ':00') : '';
+  var coTs = coTime ? (today + ' ' + coTime + ':00') : '';
 
-  if (coTime && coTime !== '-') return { status: 'checked_out', check_in: ciTime, check_out: coTime, check_in_ts: ciTs, check_out_ts: coTs, total_hours: th, att_id: String(rec['att_id'] || '') };
-  if (ciTime && ciTime !== '-') return { status: 'checked_in', check_in: ciTime, check_out: '', check_in_ts: ciTs, check_out_ts: '', total_hours: '-', att_id: String(rec['att_id'] || '') };
-  return { status: 'not_checked_in', check_in: '', check_out: '', check_in_ts: '', check_out_ts: '', total_hours: '-', att_id: '' };
+  if (coTime) {
+    return {
+      status: 'checked_out',
+      check_in: ciTime, check_out: coTime,
+      check_in_ts: ciTs, check_out_ts: coTs,
+      total_hours: th, att_id: String(rec['att_id'] || '')
+    };
+  }
+  if (ciTime) {
+    return {
+      status: 'checked_in',
+      check_in: ciTime, check_out: '',
+      check_in_ts: ciTs, check_out_ts: '',
+      total_hours: '-', att_id: String(rec['att_id'] || '')
+    };
+  }
+  return {
+    status: 'not_checked_in',
+    check_in: '', check_out: '',
+    check_in_ts: '', check_out_ts: '',
+    total_hours: '-', att_id: ''
+  };
 }
 
 
@@ -6660,10 +6696,10 @@ function getTeamAttendanceStatus(dateStr, passedUser) {
   var date = _normDate(dateStr) || getISTDate();
   var doers = getSheetData(MASTER_SHEET_ID, 'Doer List');
 
-  // Build list of staff who NeedAttendance = Yes (or blank/missing = default Yes)
+  // Staff who NeedAttendance = Yes (blank = Yes)
   var staffList = doers.filter(function (d) {
     var na = String(d['NeedAttendance'] || '').trim().toLowerCase();
-    return na !== 'no'; // blank / Yes / any other value = needs attendance
+    return na !== 'no';
   }).map(function (d) {
     return {
       emp_id: String(d['Emp ID'] || '').trim(),
@@ -6675,30 +6711,39 @@ function getTeamAttendanceStatus(dateStr, passedUser) {
     };
   }).filter(function (d) { return d.emp_id; });
 
-  // Load today's attendance records
   var attRows = [];
   try {
     attRows = getSheetData(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance').filter(function (r) {
       return _normDateSafe(r['date']) === date;
     });
-  } catch (e) { console.warn('[getTeamAttendanceStatus] att read: ' + e.message); }
+  } catch (e) {
+    console.warn('[getTeamAttendanceStatus] att read: ' + e.message);
+  }
 
-  // Build attendance map keyed by emp_id
   var attMap = {};
   attRows.forEach(function (r) {
     var eid = String(r['emp_id'] || '').trim();
     if (!eid) return;
-    if (!attMap[eid]) attMap[eid] = { check_in: '', check_out: '', status: '', total_hours: '' };
-    var ci = _extractTimeStr(r['check_in'] || r['check_in_ts'] || '');
-    var co = _extractTimeStr(r['check_out'] || r['check_out_ts'] || '');
-    if (ci && (!attMap[eid].check_in || ci < attMap[eid].check_in)) attMap[eid].check_in = ci;
-    if (co && co !== '-') attMap[eid].check_out = co;
+    if (!attMap[eid]) {
+      attMap[eid] = { check_in: '', check_out: '', status: '', total_hours: '', att_id: '' };
+    }
+
+    // ✅ Single helper
+    var times = _attTimesFromRow(r);
+    var ci = times.check_in;
+    var co = times.check_out;
+
+    if (ci && ci !== '-' && (!attMap[eid].check_in || ci < attMap[eid].check_in)) {
+      attMap[eid].check_in = ci;
+    }
+    if (co && co !== '-') {
+      attMap[eid].check_out = co;
+    }
     attMap[eid].status = String(r['status'] || '');
     attMap[eid].total_hours = String(r['total_hours'] || '');
     attMap[eid].att_id = String(r['att_id'] || '');
   });
 
-  // Merge staff + attendance
   return staffList.map(function (s) {
     var a = attMap[s.emp_id] || {};
     return {
@@ -7673,6 +7718,20 @@ function clearAllCaches() {
   });
   _cc = null; // also reset config cache
   return { success: true, message: 'All caches cleared.' };
+}
+
+function clearAttendanceCaches() {
+  var cs = CacheService.getScriptCache();
+  var ids = [NEW_ATTENDANCE_SHEET_ID, MASTER_SHEET_ID];
+  var tabs = ['Daily-Attendance', 'Doer List'];
+  ids.forEach(function (id) {
+    tabs.forEach(function (tab) {
+      try {
+        cs.remove('sd_' + String(id).slice(-6) + '_' + tab.replace(/\s/g, '_'));
+      } catch (e) {}
+    });
+  });
+  Logger.log('OK: attendance caches cleared');
 }
 
 
