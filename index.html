@@ -12589,6 +12589,14 @@
     }
 
 
+window._fkBootFailed = false;
+window._fkLoaded = true;
+if (window._fkSplashHardTimer) { clearTimeout(window._fkSplashHardTimer); window._fkSplashHardTimer = null; }
+
+
+window._fkLoaded = false;
+window._fkBootFailed = false;
+
 
     function _bootApp() {
       _safeU();
@@ -12630,15 +12638,18 @@
 
       function _hideSplash() {
         clearInterval(splashMsgTimer);
-        if (window._fkSplashHardTimer) {clearTimeout(window._fkSplashHardTimer); window._fkSplashHardTimer = null;}
+        // Hard-timeout timer yahan CLEAR MAT karo (race fix)
         if (!splash) return;
         splash.style.animation = 'splashHide .35s cubic-bezier(.4,0,.2,1) forwards';
         setTimeout(function () {
           splash.style.display = 'none';
-          // Safety: if still not loaded, show a soft loading tip (not infinite spinner)
-          if (!window._fkLoaded) {
+          // Soft tip only while still loading AND no error UI yet
+          if (!window._fkLoaded && !window._fkBootFailed) {
             var ct = document.getElementById('content');
             if (!ct) return;
+            if (ct.innerHTML.indexOf('Connection Error') > -1 ||
+              ct.innerHTML.indexOf('Loading is taking longer') > -1) return;
+
             var tips = [
               'Daily KRA/KPI tasks Checklist mein track karo',
               'GPS se attendance punch karo',
@@ -12658,6 +12669,7 @@
               '<div style="width:200px;height:3px;background:var(--bdr);border-radius:3px;overflow:hidden;margin-top:28px">' +
               '<div style="height:100%;width:45%;background:linear-gradient(90deg,var(--P),var(--Pd));border-radius:3px;animation:fkBarSlide 1.6s ease-in-out infinite"></div>' +
               '</div></div>';
+            if (window._fkTipTimer) clearInterval(window._fkTipTimer);
             window._fkTipTimer = setInterval(function () {
               ti = (ti + 1) % tips.length;
               var el = document.getElementById('_fkTip');
@@ -12669,11 +12681,19 @@
         }, 340);
       }
 
-      // ── HARD TIMEOUT: 18 seconds — force stop infinite spinner ───────────────
       window._fkSplashHardTimer = setTimeout(function () {
-        if (window._fkLoaded) return; // already loaded successfully
+        if (window._fkLoaded) return;
         console.warn('[Fresko] Splash hard-timeout 18s — forcing retry UI');
-        _hideSplash();
+        window._fkBootFailed = true;          // soft tip ko block karo
+        if (window._fkTipTimer) {clearInterval(window._fkTipTimer); window._fkTipTimer = null;}
+
+        // Splash hide WITHOUT triggering soft tip
+        clearInterval(splashMsgTimer);
+        if (splash) {
+          splash.style.animation = 'none';
+          splash.style.display = 'none';
+        }
+
         var ct = document.getElementById('content');
         if (ct) {
           ct.innerHTML =
@@ -12683,7 +12703,7 @@
             '<div style="font-size:13px;color:var(--tx2);line-height:1.6;margin-bottom:24px;max-width:300px">' +
             'Server respond nahi kar raha.<br>Internet check karo ya Retry dabao.</div>' +
             '<div style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center">' +
-            '<button class="btn" style="min-height:48px;padding:0 28px;font-size:15px" onclick="_bootApp()">' +
+            '<button class="btn" style="min-height:48px;padding:0 28px;font-size:15px" onclick="window._fkBootFailed=false;_bootApp()">' +
             '<i class="fas fa-rotate-right"></i> Retry</button>' +
             '<button class="btn" style="min-height:48px;padding:0 22px;font-size:14px;background:var(--sur2);color:var(--tx2);border:1.5px solid var(--bdr)" onclick="_logout()">' +
             '<i class="fas fa-right-from-bracket"></i> Logout</button>' +
@@ -12789,6 +12809,11 @@
 
     /** Shared retry / logout error screen used by timeout + hard-timeout */
     function _showBootError(msg) {
+
+      window._fkBootFailed = true;
+  if (window._fkTipTimer) { clearInterval(window._fkTipTimer); window._fkTipTimer = null; }
+  if (window._fkSplashHardTimer) { clearTimeout(window._fkSplashHardTimer); window._fkSplashHardTimer = null; }
+
       var ct = document.getElementById('content');
       if (!ct) return;
       ct.innerHTML =
