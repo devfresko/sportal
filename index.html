@@ -22154,93 +22154,134 @@
        STUB LOADERS — Fallbacks for modules not yet fully implemented
        These are called by _switchTab and prevent console errors.
     ══════════════════════════════════════════════════════════════════════ */
-    function _loadToday() {
-      var empId = document.getElementById('ckEmp') ? document.getElementById('ckEmp').value : (_U ? _U.emp_code : '');
-      var date = document.getElementById('ckDate') ? document.getElementById('ckDate').value : _today();
-      var el = document.getElementById('ckList');
-      var prog = document.getElementById('ckProgress');
-      if (!el) return;
-      el.innerHTML = _skel(4);
+function _loadToday() {
+  var empId = document.getElementById('ckEmp') ? document.getElementById('ckEmp').value : (_U ? _U.emp_code : '');
+  var date = document.getElementById('ckDate') ? document.getElementById('ckDate').value : _today();
+  var el = document.getElementById('ckList');
+  var prog = document.getElementById('ckProgress');
+  if (!el) return;
+  el.innerHTML = _skel(4);
 
-      _gas('getTodayTasks', [empId, date], function (tasks) {
-        _D.todayTasks = tasks || [];
-        var done = tasks.filter(function (t) {return t.status === 'Done';}).length;
-        var total = tasks.length;
-        var pct = total > 0 ? Math.round(done / total * 100) : 0;
-        if (prog) {
-          prog.innerHTML =
-            '<div style="display:flex;align-items:center;gap:14px;background:var(--bg);border:1px solid var(--bdr);border-radius:10px;padding:12px 16px">' +
-            '<div style="flex:1">' +
-            '<div style="display:flex;justify-content:space-between;margin-bottom:6px">' +
-            '<span style="font-size:12px;font-weight:700;color:var(--tx2)">Today\'s Progress</span>' +
-            '<span style="font-size:12px;font-weight:900;color:var(--P)">' + done + ' / ' + total + ' done</span>' +
-            '</div>' +
-            '<div class="pbar-wrap"><div class="pbar" style="width:' + pct + '%;background:' + (pct === 100 ? 'var(--G)' : pct >= 60 ? 'var(--P)' : 'var(--O)') + '"></div></div>' +
-            '</div>' +
-            '<div style="font-size:22px;font-weight:900;color:' + (pct === 100 ? 'var(--G)' : pct >= 60 ? 'var(--P)' : 'var(--O)') + '">' + pct + '%</div>' +
-            '</div>';
-        }
-        if (!tasks.length) {
-          el.innerHTML = '<div class="empty-state"><i class="fas fa-list-check"></i><h4>No Tasks Today</h4><p>No tasks are scheduled for ' + _fmtDate(date) + '.</p></div>';
-          return;
-        }
-        el.innerHTML = tasks.map(function (t) {
-          var isDone = t.status === 'Done';
-          var isTransOut = !!(t.is_transferred);
-          var isReceived = !!(t.is_received);
-          var canDo = !isDone && !isTransOut;
-          var isTodayView = (date === _today());
-          var canEditRemark = isDone && !isTransOut && isTodayView;
+  // Past dates read full Checklist history — allow up to 35s
+  _gasX('getTodayTasks', [empId, date], 35000, function (tasks) {
+    tasks = tasks || [];
+    _D.todayTasks = tasks;
+    var done = tasks.filter(function (t) { return t.status === 'Done'; }).length;
+    var total = tasks.length;
+    var pct = total > 0 ? Math.round(done / total * 100) : 0;
 
-          var actualFmt = t.actual ? _tsShort(t.actual) : '';
-          var planFmt = '';
-          if (t.scheduled_time && t.planned) {
-            planFmt = _fmtDate(t.planned) + ' ' + t.scheduled_time;
-          } else if (t.scheduled_time) {
-            planFmt = t.scheduled_time;
-          }
-
-          var rowId = 'ckrow_' + t.row_num + '_' + Math.random().toString(36).slice(2, 7);
-          var sc = _colorForStatus(t.status);
-          var rowBorder = isReceived ? 'border-left:3px solid var(--V)' : '';
-
-          // Action button (pending → Done | today-done → Edit remark)
-          var actionBtn = '';
-          if (canDo) {
-            actionBtn = '<button class="ck-btn btn btn-sm btn-xs" onclick="_markDone(\'' + rowId + '\')"><i class="fas fa-check"></i> Done</button>';
-          } else if (canEditRemark) {
-            var safeRemark = String(t.remark || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-            actionBtn = '<button class="btn btn-outline btn-sm btn-xs" onclick="_editDoneRemark(\'' + rowId + '\',\'' + safeRemark + '\')"><i class="fas fa-pen"></i> Edit remark</button>';
-          }
-
-          return '<div class="anim-item" id="' + rowId + '" data-row="' + t.row_num + '" data-occ="' + t.occ + '" data-uid="' + _esc(t.task_uid || '') + '" data-planned="' + _esc(t.planned || '') + '" data-name="' + _esc(t.task_name || '') + '" data-dt="' + _esc(date) + '" style="display:flex;align-items:flex-start;gap:12px;padding:13px 16px;background:var(--sur);border:1px solid var(--bdr);border-radius:12px;margin-bottom:8px;' + rowBorder + '">' +
-            '<div class="ck-circle" style="width:24px;height:24px;border-radius:50%;border:2px solid ' + sc + ';background:' + (isDone ? sc : 'transparent') + ';flex-shrink:0;display:flex;align-items:center;justify-content:center;cursor:' + (canDo ? 'pointer' : 'default') + ';margin-top:1px" ' +
-            (canDo ? 'onclick="_markDone(\'' + rowId + '\')"' : '') + '>' +
-            (isDone ? '<i class="fas fa-check" style="font-size:10px;color:#fff"></i>' : '') +
-            '</div>' +
-            '<div style="flex:1;min-width:0">' +
-            '<div style="font-size:13.5px;font-weight:700;' + (isDone || isTransOut ? 'text-decoration:line-through;color:var(--tx3)' : '') + ';word-break:break-word">' + _esc(t.task_name) + '</div>' +
-            '<div style="font-size:11px;color:var(--tx3);margin-top:4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
-            _freqBadge(t.frequency) +
-            (isTransOut ? '<span style="padding:2px 8px;border-radius:10px;background:var(--Ol);color:var(--O);font-weight:700;font-size:10.5px"><i class="fas fa-share"></i> Transferred away</span>' : '') +
-            (isReceived ? '<span style="padding:2px 8px;border-radius:10px;background:var(--Vl);color:var(--V);font-weight:700;font-size:10.5px"><i class="fas fa-arrow-right-arrow-left"></i> Transferred to you</span>' + (t.transfer_by ? '<span style="color:var(--tx3);font-size:10.5px"> by ' + _esc(t.transfer_by) + '</span>' : '') : '') +
-            (t.remark ? '<span style="padding:2px 8px;border-radius:8px;background:var(--Il);color:var(--I);font-size:10.5px;font-weight:600"><i class="fas fa-comment-dots"></i> ' + _esc(t.remark) + '</span>' : '') +
-            '<div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;align-items:center">' +
-            (planFmt ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:8px;background:var(--Pl);color:var(--P);font-size:10.5px;font-weight:800"><i class="fas fa-calendar-clock" style="font-size:10px"></i> Plan: <strong>' + _esc(planFmt) + '</strong></span>' : '') +
-            (actualFmt
-              ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:8px;background:var(--Gl);color:var(--G);font-size:10.5px;font-weight:800"><i class="fas fa-check-circle" style="font-size:10px"></i> Actual: <strong>' + actualFmt + '</strong></span>'
-              : (planFmt && !isDone ? '<span style="padding:2px 9px;border-radius:8px;background:var(--sur2);color:var(--tx3);font-size:10.5px;border:1px solid var(--bdr)">Actual: pending</span>' : '')) +
-            '</div>' +
-            '</div></div>' +
-            '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">' +
-            _statusBadge(t.status) +
-            actionBtn +
-            '</div>' +
-            '</div>';
-        }).join('');
-      }, function (e) {el.innerHTML = (e && e.message && e.message.indexOf('Network') > -1) ? '<div style="text-align:center;padding:24px"><div style="font-size:28px;margin-bottom:8px">📡</div><div style="font-weight:700;color:var(--tx);margin-bottom:4px">Connection Error</div><div style="font-size:12px;color:var(--tx2);margin-bottom:12px">Server se connect nahi ho pa raha</div><button class="btn btn-sm" onclick="_forceRefresh()"><i class="fas fa-rotate-right"></i> Retry</button></div>' : '<div class="te">' + _esc(e.message) + '</div>';});
+    if (prog) {
+      prog.innerHTML =
+        '<div style="display:flex;align-items:center;gap:14px;background:var(--bg);border:1px solid var(--bdr);border-radius:10px;padding:12px 16px">' +
+        '<div style="flex:1">' +
+        '<div style="display:flex;justify-content:space-between;margin-bottom:6px">' +
+        '<span style="font-size:12px;font-weight:700;color:var(--tx2)">Today\'s Progress</span>' +
+        '<span style="font-size:12px;font-weight:900;color:var(--P)">' + done + ' / ' + total + ' done</span>' +
+        '</div>' +
+        '<div class="pbar-wrap"><div class="pbar" style="width:' + pct + '%;background:' +
+        (pct === 100 ? 'var(--G)' : pct >= 60 ? 'var(--P)' : 'var(--O)') + '"></div></div>' +
+        '</div>' +
+        '<div style="font-size:22px;font-weight:900;color:' +
+        (pct === 100 ? 'var(--G)' : pct >= 60 ? 'var(--P)' : 'var(--O)') + '">' + pct + '%</div>' +
+        '</div>';
     }
 
+    if (!tasks.length) {
+      el.innerHTML =
+        '<div class="empty-state"><i class="fas fa-list-check"></i>' +
+        '<h4>No Tasks</h4>' +
+        '<p>No tasks are scheduled for ' + _fmtDate(date) + '.</p></div>';
+      return;
+    }
+
+    el.innerHTML = tasks.map(function (t) {
+      var isDone = t.status === 'Done';
+      var isTransOut = !!(t.is_transferred);
+      var isReceived = !!(t.is_received);
+      var canDo = !isDone && !isTransOut;
+      var isTodayView = (date === _today());
+      var canEditRemark = isDone && !isTransOut && isTodayView;
+
+      var actualFmt = t.actual ? _tsShort(t.actual) : '';
+      var planFmt = '';
+      if (t.scheduled_time && t.planned) {
+        planFmt = _fmtDate(t.planned) + ' ' + t.scheduled_time;
+      } else if (t.scheduled_time) {
+        planFmt = t.scheduled_time;
+      }
+
+      var rowId = 'ckrow_' + t.row_num + '_' + Math.random().toString(36).slice(2, 7);
+      var sc = _colorForStatus(t.status);
+      var rowBorder = isReceived ? 'border-left:3px solid var(--V)' : '';
+
+      var actionBtn = '';
+      if (canDo) {
+        actionBtn = '<button class="ck-btn btn btn-sm btn-xs" onclick="_markDone(\'' + rowId + '\')">' +
+          '<i class="fas fa-check"></i> Done</button>';
+      } else if (canEditRemark) {
+        var safeRemark = String(t.remark || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        actionBtn = '<button class="btn btn-outline btn-sm btn-xs" onclick="_editDoneRemark(\'' + rowId + '\',\'' + safeRemark + '\')">' +
+          '<i class="fas fa-pen"></i> Edit remark</button>';
+      }
+
+      return '<div class="anim-item" id="' + rowId + '" data-row="' + t.row_num + '" data-occ="' + t.occ +
+        '" data-uid="' + _esc(t.task_uid || '') + '" data-planned="' + _esc(t.planned || '') +
+        '" data-name="' + _esc(t.task_name || '') + '" data-dt="' + _esc(date) +
+        '" style="display:flex;align-items:flex-start;gap:12px;padding:13px 16px;background:var(--sur);border:1px solid var(--bdr);border-radius:12px;margin-bottom:8px;' + rowBorder + '">' +
+        '<div class="ck-circle" style="width:24px;height:24px;border-radius:50%;border:2px solid ' + sc +
+        ';background:' + (isDone ? sc : 'transparent') +
+        ';flex-shrink:0;display:flex;align-items:center;justify-content:center;cursor:' +
+        (canDo ? 'pointer' : 'default') + ';margin-top:1px" ' +
+        (canDo ? 'onclick="_markDone(\'' + rowId + '\')"' : '') + '>' +
+        (isDone ? '<i class="fas fa-check" style="font-size:10px;color:#fff"></i>' : '') +
+        '</div>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:13.5px;font-weight:700;' +
+        (isDone || isTransOut ? 'text-decoration:line-through;color:var(--tx3)' : '') +
+        ';word-break:break-word">' + _esc(t.task_name) + '</div>' +
+        '<div style="font-size:11px;color:var(--tx3);margin-top:4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
+        _freqBadge(t.frequency) +
+        (isTransOut
+          ? '<span style="padding:2px 8px;border-radius:10px;background:var(--Ol);color:var(--O);font-weight:700;font-size:10.5px"><i class="fas fa-share"></i> Transferred away</span>'
+          : '') +
+        (isReceived
+          ? '<span style="padding:2px 8px;border-radius:10px;background:var(--Vl);color:var(--V);font-weight:700;font-size:10.5px"><i class="fas fa-arrow-right-arrow-left"></i> Transferred to you</span>' +
+            (t.transfer_by ? '<span style="color:var(--tx3);font-size:10.5px"> by ' + _esc(t.transfer_by) + '</span>' : '')
+          : '') +
+        (t.remark
+          ? '<span style="padding:2px 8px;border-radius:8px;background:var(--Il);color:var(--I);font-size:10.5px;font-weight:600"><i class="fas fa-comment-dots"></i> ' + _esc(t.remark) + '</span>'
+          : '') +
+        '<div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;align-items:center">' +
+        (planFmt
+          ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:8px;background:var(--Pl);color:var(--P);font-size:10.5px;font-weight:800"><i class="fas fa-calendar-clock" style="font-size:10px"></i> Plan: <strong>' + _esc(planFmt) + '</strong></span>'
+          : '') +
+        (actualFmt
+          ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:8px;background:var(--Gl);color:var(--G);font-size:10.5px;font-weight:800"><i class="fas fa-check-circle" style="font-size:10px"></i> Actual: <strong>' + actualFmt + '</strong></span>'
+          : (planFmt && !isDone
+            ? '<span style="padding:2px 9px;border-radius:8px;background:var(--sur2);color:var(--tx3);font-size:10.5px;border:1px solid var(--bdr)">Actual: pending</span>'
+            : '')) +
+        '</div>' +
+        '</div></div>' +
+        '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">' +
+        _statusBadge(t.status) +
+        actionBtn +
+        '</div>' +
+        '</div>';
+    }).join('');
+  }, function (e) {
+    var msg = (e && e.message) ? e.message : 'Server se connect nahi ho pa raha';
+    el.innerHTML =
+      '<div style="text-align:center;padding:28px 16px">' +
+      '<div style="font-size:28px;margin-bottom:8px">📡</div>' +
+      '<div style="font-weight:700;color:var(--tx);margin-bottom:6px;font-size:15px">Connection Error</div>' +
+      '<div style="font-size:12px;color:var(--tx2);margin-bottom:14px;line-height:1.5;max-width:320px;margin-left:auto;margin-right:auto">' +
+      _esc(msg) + '</div>' +
+      '<button class="btn btn-sm" onclick="_loadToday()">' +
+      '<i class="fas fa-rotate-right"></i> Retry</button>' +
+      '<div style="font-size:11px;color:var(--tx3);margin-top:12px">Past dates pe pehli baar 10–20s lag sakta hai</div>' +
+      '</div>';
+  });
+}
 
     function _editDoneRemark(rowId, currentRemark) {
       var row = document.getElementById(rowId);
