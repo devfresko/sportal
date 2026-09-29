@@ -973,12 +973,16 @@ function getDashboardStats(passedUser) {
 function getTodayTasks(empId, date, passedUser) {
   var user = verifyUser(passedUser);
   if (!user) throw new Error('NOT_AUTHENTICATED');
-  var target = date || getISTDate();
+  var target = _normDateSafe(date) || getISTDate();
   var code = empId || _myCode(user);
   var isToday = (target === getISTDate());
-  var isHol = getSheetData(MASTER_SHEET_ID, 'Holiday List').some(function (h) {
-    return _normDateSafe(h['Date']) === target;
-  });
+
+  var isHol = false;
+  try {
+    isHol = getSheetData(MASTER_SHEET_ID, 'Holiday List').some(function (h) {
+      return _normDateSafe(h['Date']) === target;
+    });
+  } catch (eH) {}
 
   var ss = _getSpreadsheet(CHECKLIST_MASTER_ID);
   var sh = ss.getSheetByName(isToday ? 'Checklist_Today' : 'Checklist');
@@ -986,8 +990,9 @@ function getTodayTasks(empId, date, passedUser) {
   var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
   if (lastRow < 2) return [];
 
-  var data = sh.getRange(1, 1, lastRow, lastCol).getValues();
-  var hdrs = data[0].map(function (h) { return String(h || '').trim(); });
+  var hdrs = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) {
+    return String(h || '').trim();
+  });
   var iNId = hdrs.indexOf('Name Id'), iPlnd = hdrs.indexOf('Planned');
   var iTsk = hdrs.indexOf('Task'), iStat = hdrs.indexOf('Status');
   var iAct = hdrs.indexOf('Actual'), iFreq = hdrs.indexOf('Freq');
@@ -997,9 +1002,9 @@ function getTodayTasks(empId, date, passedUser) {
   var iTransBy = hdrs.indexOf('Transfer By');
   var iTransRea = hdrs.indexOf('Transfer Reason');
   var iRemark = hdrs.indexOf('Remark');
+  if (iNId < 0 || iPlnd < 0) return [];
 
-  // Build planned_time map from Task List's Day/Date column
-  // New format: "dd/MM/yyyy HH:mm:ss" e.g. "08/08/2026 14:00:00"
+  // ── Task time map (small sheet — ok) ─────────────────────────────────────
   var taskTimeMap = {};
   try {
     getSheetData(MASTER_SHEET_ID, 'Task List').forEach(function (tl) {
@@ -1007,84 +1012,114 @@ function getTodayTasks(empId, date, passedUser) {
       var rawDD = tl['Day/Date'];
       if (!uid) return;
       var timePart = '';
-      function _t12(h, m) { var ap = h >= 12 ? 'PM' : 'AM'; return (h % 12 || 12) + ':' + (m < 10 ? '0' : '') + m + ' ' + ap; }
+      function _t12(h, m) {
+        var ap = h >= 12 ? 'PM' : 'AM';
+        return (h % 12 || 12) + ':' + (m < 10 ? '0' : '') + m + ' ' + ap;
+      }
       if (rawDD instanceof Date) {
-        // Sheets parsed the value as a Date (old records without text format)
         timePart = _t12(rawDD.getHours(), rawDD.getMinutes());
       } else {
         var dd = String(rawDD || '').trim();
-        // NEW format: "dd/MM/yyyy HH:mm:ss" — extract HH:mm
         var ddmmMatch = dd.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
-        if (ddmmMatch) {
-          timePart = _t12(parseInt(ddmmMatch[4], 10), parseInt(ddmmMatch[5], 10));
-        }
-        // ISO datetime "2026-03-31T18:30:00.000Z" (old records)
+        if (ddmmMatch) timePart = _t12(parseInt(ddmmMatch[4], 10), parseInt(ddmmMatch[5], 10));
         else if (dd.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)) {
           var iso = new Date(dd);
           if (!isNaN(iso.getTime())) timePart = _t12(iso.getHours(), iso.getMinutes());
-        }
-        // Corrupted "Sat Dec 30 1899 13:00:00 GMT+..."
-        else if (dd.match(/\d{4}\s+(\d{2}):(\d{2})/)) {
+        } else if (dd.match(/\d{4}\s+(\d{2}):(\d{2})/)) {
           var gm = dd.match(/\d{4}\s+(\d{2}):(\d{2})/);
           timePart = _t12(parseInt(gm[1], 10), parseInt(gm[2], 10));
-        }
-        // Old "Daily · 1:00 PM" or "Monday · 10:30 AM" — extract after ·
-        else if (dd.indexOf(' · ') > -1) timePart = dd.substring(dd.indexOf(' · ') + 3).trim();
-        // Already "11:00 AM" or "11:00"
+        } else if (dd.indexOf(' · ') > -1) timePart = dd.substring(dd.indexOf(' · ') + 3).trim();
         else if (dd.match(/^\d{1,2}:\d{2}/)) timePart = dd;
       }
       if (timePart) taskTimeMap[uid] = timePart;
     });
-  } catch (eTm) { }
+  } catch (eTm) {}
+
+  // ── FAST PATH: only scan Name Id + Planned (+ Transferred To) columns ────
+  // Full-width getValues on 50k-row Checklist was causing 25s+ timeouts.
+  var nRows = lastRow - 1;
+  var nameCol = sh.getRange(2, iNId + 1, nRows, 1).getValues();
+  var planCol = sh.getRange(2, iPlnd + 1, nRows, 1).getValues();
+  var transCol = iTransTo >= 0 ? sh.getRange(2, iTransTo + 1, nRows, 1).getValues() : null;
+
+  var matchRows = []; // 1-based sheet row numbers
+  for (var i = 0; i < nRows; i++) {
+    var nameId = String(nameCol[i][0] || '').trim();
+    var transTo = transCol ? String(transCol[i][0] || '').trim() : '';
+    if (nameId !== code && transTo !== code) continue;
+    var pd = _normDateSafe(planCol[i][0]);
+    if (pd !== target) continue;
+    matchRows.push(i + 2);
+  }
+
+  if (matchRows.length === 0) return [];
+
+  // ── Read only matching rows (full width) ─────────────────────────────────
+  // Group contiguous rows into blocks to minimize getRange calls
+  matchRows.sort(function (a, b) { return a - b; });
+  var blocks = [];
+  var bStart = matchRows[0], bEnd = matchRows[0];
+  for (var m = 1; m < matchRows.length; m++) {
+    if (matchRows[m] === bEnd + 1) {
+      bEnd = matchRows[m];
+    } else {
+      blocks.push([bStart, bEnd]);
+      bStart = bEnd = matchRows[m];
+    }
+  }
+  blocks.push([bStart, bEnd]);
+
+  var rowSet = {};
+  matchRows.forEach(function (r) { rowSet[r] = true; });
 
   var out = [];
   var occCount = {};
-  for (var i = 1; i < data.length; i++) {
-    var row = data[i];
-    var nameId = iNId >= 0 ? String(row[iNId] || '').trim() : '';
-    var transTo = iTransTo >= 0 ? String(row[iTransTo] || '').trim() : '';
-    var rowDate = iPlnd >= 0 ? _normDateSafe(row[iPlnd]) : '';
 
-    if (rowDate && rowDate !== target) continue; // always filter by date (Checklist_Today has full week)
+  blocks.forEach(function (blk) {
+    var r0 = blk[0], r1 = blk[1];
+    var blockData = sh.getRange(r0, 1, r1 - r0 + 1, lastCol).getValues();
+    for (var bi = 0; bi < blockData.length; bi++) {
+      var absRow = r0 + bi;
+      if (!rowSet[absRow]) continue;
+      var row = blockData[bi];
+      var nameId = iNId >= 0 ? String(row[iNId] || '').trim() : '';
+      var transTo = iTransTo >= 0 ? String(row[iTransTo] || '').trim() : '';
+      var rowDate = iPlnd >= 0 ? _normDateSafe(row[iPlnd]) : target;
+      var st = iStat >= 0 ? String(row[iStat] || '').trim() : '';
+      var taskUid = '';
+      if (iTid >= 0 && row[iTid]) taskUid = String(row[iTid]).trim();
+      else if (iUID >= 0 && row[iUID]) taskUid = String(row[iUID]).trim();
 
-    var isOwn = nameId === String(code);
-    // Task received by me = Name Id is mine AND Transferred To is also mine (task routed to me)
-    var isReceived = isOwn && !!transTo && transTo === String(code);
-    // Task sent away by me = Name Id is mine AND Transferred To is SOMEONE ELSE
-    var isTransOut = isOwn && !!transTo && transTo !== String(code);
+      var occKey = taskUid || (iTsk >= 0 ? String(row[iTsk] || '') : '') || String(absRow);
+      var occ = occCount[occKey] || 0;
+      occCount[occKey] = occ + 1;
 
-    // Show this task if: (a) it's mine OR (b) it was transferred FROM someone else TO me
-    var isMine = isOwn;
-    var isFromSomeone = !isOwn && transTo === String(code);
-    if (!isMine && !isFromSomeone) continue;
+      var isTransOut = (nameId === code && transTo && transTo !== code);
+      var isReceived = (transTo === code && nameId !== code);
+      var isFromSomeone = isReceived;
 
-    var taskName = iTsk >= 0 ? String(row[iTsk] || '').trim() : '';
-    var taskUid = (iTid >= 0 ? String(row[iTid] || '') : '') || (iUID >= 0 ? String(row[iUID] || '') : '');
-    var occKey = nameId + '|' + taskName;
-    var occ = occCount[occKey] || 0;
-    occCount[occKey] = occ + 1;
+      out.push({
+        row_num: absRow,
+        occ: occ,
+        task_uid: taskUid,
+        task_name: iTsk >= 0 ? String(row[iTsk] || '') : '',
+        frequency: iFreq >= 0 ? String(row[iFreq] || '') : '',
+        emp_id: nameId,
+        planned: rowDate || target,
+        status: st || (isHol ? 'Holiday' : 'Pending'),
+        actual: iAct >= 0 ? String(row[iAct] || '') : '',
+        transferred_to: transTo,
+        transferred_at: iTransAt >= 0 ? String(row[iTransAt] || '') : '',
+        transfer_by: iTransBy >= 0 ? String(row[iTransBy] || '') : '',
+        transfer_reason: iTransRea >= 0 ? String(row[iTransRea] || '') : '',
+        is_transferred: isTransOut,
+        is_received: isReceived || isFromSomeone,
+        remark: iRemark >= 0 ? String(row[iRemark] || '') : '',
+        scheduled_time: taskTimeMap[taskUid] || taskTimeMap[(taskUid || '').split('_')[0]] || ''
+      });
+    }
+  });
 
-    var st = iStat >= 0 ? String(row[iStat] || '').trim() : '';
-    out.push({
-      row_num: i + 1,
-      occ: occ,
-      task_uid: taskUid,
-      task_name: taskName,
-      frequency: iFreq >= 0 ? String(row[iFreq] || '') : '',
-      emp_id: nameId,
-      planned: rowDate || target,
-      status: st || (isHol ? 'Holiday' : 'Pending'),
-      actual: iAct >= 0 ? String(row[iAct] || '') : '',
-      transferred_to: transTo,
-      transferred_at: iTransAt >= 0 ? String(row[iTransAt] || '') : '',
-      transfer_by: iTransBy >= 0 ? String(row[iTransBy] || '') : '',
-      transfer_reason: iTransRea >= 0 ? String(row[iTransRea] || '') : '',
-      is_transferred: isTransOut,  // I sent this away → no Done button, orange badge
-      is_received: isReceived || isFromSomeone,  // came TO me → Done button, purple badge
-      remark: iRemark >= 0 ? String(row[iRemark] || '') : '',
-      scheduled_time: taskTimeMap[taskUid] || taskTimeMap[(taskUid || '').split('_')[0]] || ''
-    });
-  }
   return out;
 }
 
