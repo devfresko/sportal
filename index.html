@@ -13498,53 +13498,112 @@
 
     // GPS-aware check-in call — payload can be {ts,lat,lng} or plain timestamp string
     function _doCheckInCall(btn, payload) {
-      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Processing...';
+      // Optimistic: turant UI update
+      var nowStr = new Date().toLocaleTimeString('en-IN', {hour: '2-digit', minute: '2-digit', hour12: true});
+      var prevState = _punchState;
+      _punchState = 'checked_in';
+      _renderPunchCard({
+        status: 'checked_in',
+        check_in: nowStr,
+        check_in_ts: (typeof payload === 'object' ? payload.ts : payload) || new Date().toISOString()
+      });
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Saving...';
+      }
+
       _gas('recordCheckIn', [payload], function (res) {
         if (res && res.success) {
           _punchState = 'checked_in';
-          _toast('✓ Checked in at ' + (res.check_in || ''), 'ok');
-          _addNtf('Check IN at ' + (res.check_in || ''), 'fa-sign-in-alt', 'var(--Gl)', 'var(--G)');
-          _renderPunchCard({status: 'checked_in', check_in: res.check_in, check_in_ts: res.timestamp || ''});
-          // Re-verify location for the upcoming check-out action — the
-          // 'ok' reading from check-in time could be hours stale by the
-          // time this person actually checks out.
-          _gpsState = 'unchecked'; _initGpsGate();
+          _toast('✓ Checked in at ' + (res.check_in || nowStr), 'ok');
+          _addNtf('Check IN at ' + (res.check_in || nowStr), 'fa-sign-in-alt', 'var(--Gl)', 'var(--G)');
+          _renderPunchCard({
+            status: 'checked_in',
+            check_in: res.check_in || nowStr,
+            check_in_ts: res.timestamp || ''
+          });
+          if (_D.todayAtt) {
+            _D.todayAtt.status = 'checked_in';
+            _D.todayAtt.check_in = res.check_in || nowStr;
+          }
+          _lcSave();
+          _gpsState = 'unchecked';
+          _initGpsGate();
         } else {
+          // Rollback
+          _punchState = prevState;
           var errMsg = (res && res.error) ? res.error : 'Unknown error';
-          // GPS_BLOCKED message — show nicely
           if (errMsg.indexOf('GPS_BLOCKED:') === 0) {
             errMsg = errMsg.replace('GPS_BLOCKED:', '');
             _toast('📍 ' + errMsg, 'err');
           } else {
             _toast('Check-in failed: ' + errMsg, 'err');
           }
-          btn.disabled = false;
-          btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Check IN';
+          _loadPunchStatus(); // server se sahi state lao
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Check IN';
+          }
         }
       }, function (e) {
-        var msg = e.message || '';
+        // Rollback on network error
+        _punchState = prevState;
+        var msg = (e && e.message) ? e.message : 'Network error';
         if (msg.indexOf('GPS_BLOCKED:') === 0) {
           _toast('📍 ' + msg.replace('GPS_BLOCKED:', ''), 'err');
         } else {
           _toast('Check-in failed: ' + msg, 'err');
         }
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Check IN';
+        _loadPunchStatus();
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Check IN';
+        }
       });
     }
 
-    // GPS-aware check-out call — mirrors _doCheckInCall's GPS_BLOCKED
-    // handling, since recordCheckOut now enforces the same server-side
-    // location check (previously it didn't check location at all).
     function _doCheckOutCall(btn, payload) {
-      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Processing...';
+      // Optimistic
+      var nowStr = new Date().toLocaleTimeString('en-IN', {hour: '2-digit', minute: '2-digit', hour12: true});
+      var prevState = _punchState;
+      var prevAtt = _D.todayAtt ? JSON.parse(JSON.stringify(_D.todayAtt)) : null;
+
+      _punchState = 'checked_out';
+      _renderPunchCard({
+        status: 'checked_out',
+        check_in: (_D.todayAtt && _D.todayAtt.check_in) || '',
+        check_out: nowStr,
+        check_out_ts: (typeof payload === 'object' ? payload.ts : payload) || new Date().toISOString(),
+        total_hours: '…'
+      });
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Saving...';
+      }
+
       _gas('recordCheckOut', [payload], function (res) {
         if (res && res.success) {
           _punchState = 'checked_out';
-          _toast('✓ Checked out at ' + (res.check_out || '') + (res.total_hours ? ' · ' + res.total_hours : ''), 'ok');
-          _addNtf('Check OUT at ' + (res.check_out || ''), 'fa-sign-out-alt', 'var(--Ol)', 'var(--O)');
-          _renderPunchCard({status: 'checked_out', check_in: res.check_in || '', check_out: res.check_out || '', check_in_ts: '', check_out_ts: res.timestamp || '', total_hours: res.total_hours || ''});
+          _toast('✓ Checked out at ' + (res.check_out || nowStr) + (res.total_hours ? ' · ' + res.total_hours : ''), 'ok');
+          _addNtf('Check OUT at ' + (res.check_out || nowStr), 'fa-sign-out-alt', 'var(--Ol)', 'var(--O)');
+          _renderPunchCard({
+            status: 'checked_out',
+            check_in: res.check_in || (_D.todayAtt && _D.todayAtt.check_in) || '',
+            check_out: res.check_out || nowStr,
+            check_in_ts: '',
+            check_out_ts: res.timestamp || '',
+            total_hours: res.total_hours || ''
+          });
+          if (_D.todayAtt) {
+            _D.todayAtt.status = 'checked_out';
+            _D.todayAtt.check_out = res.check_out || nowStr;
+            _D.todayAtt.total_hours = res.total_hours || '';
+          }
+          _lcSave();
         } else {
+          // Rollback
+          _punchState = prevState;
+          if (prevAtt) _D.todayAtt = prevAtt;
           var errMsg = (res && res.error) ? res.error : 'Unknown error';
           if (errMsg.indexOf('GPS_BLOCKED:') === 0) {
             errMsg = errMsg.replace('GPS_BLOCKED:', '');
@@ -13552,20 +13611,29 @@
           } else {
             _toast('Check-out failed: ' + errMsg, 'err');
           }
-          btn.disabled = false;
-          btn.innerHTML = '<i class="fas fa-sign-out-alt"></i> Check OUT';
+          _loadPunchStatus();
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-sign-out-alt"></i> Check OUT';
+          }
         }
       }, function (e) {
-        var msg = e.message || '';
+        _punchState = prevState;
+        if (prevAtt) _D.todayAtt = prevAtt;
+        var msg = (e && e.message) ? e.message : 'Network error';
         if (msg.indexOf('GPS_BLOCKED:') === 0) {
           _toast('📍 ' + msg.replace('GPS_BLOCKED:', ''), 'err');
         } else {
           _toast('Check-out failed: ' + msg, 'err');
         }
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-sign-out-alt"></i> Check OUT';
+        _loadPunchStatus();
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-sign-out-alt"></i> Check OUT';
+        }
       });
     }
+
 
     function _doPunch() {
       var btn = document.getElementById('dashPunchBtn');
@@ -15870,11 +15938,27 @@
         function () {
           var remark = ((document.getElementById('delRemarkEl') || {}).value || '').trim();
           _closeModal();
+
+          // ── Optimistic UI ──────────────────────────────────────
+          var card = btn.closest('.card, .del-card, [data-tid]') || btn.parentElement;
+          var prevHtml = btn.innerHTML;
+          if (card) card.style.opacity = '0.55';
+          btn.disabled = true;
+          btn.innerHTML = '<i class="fas fa-check"></i> Completed';
+
           _gas('updateDelegationStatus', [tid, 'Completed', remark], function () {
             _toast('Marked as Completed!', 'ok');
             _addNtf('Delegation marked complete', 'fa-check-circle', 'var(--Gl)', 'var(--G)');
+            delete _D.myDelegationsMine;
+            delete _D.myDelegations;
             _loadDMine();
-          }, function (e) {_toast('Error: ' + e.message, 'err');});
+          }, function (e) {
+            // Rollback
+            if (card) card.style.opacity = '';
+            btn.disabled = false;
+            btn.innerHTML = prevHtml || '<i class="fas fa-check"></i> Mark Complete';
+            _toast('Error: ' + ((e && e.message) || 'Failed'), 'err');
+          });
         },
         '<i class="fas fa-check"></i> Complete'
       );
@@ -22888,7 +22972,6 @@
       );
     }
 
-
     function _markDone(rowId) {
       var row = document.getElementById(rowId);
       if (!row) return;
@@ -22899,7 +22982,6 @@
       var taskPlanned = row.dataset.planned || '';
       var date = row.dataset.dt || '';
 
-      // Show optional remark modal before saving Done
       _openModal(
         '<i class="fas fa-check-circle" style="color:var(--G)"></i> Mark as Done',
         '<div style="font-size:14px;font-weight:700;margin-bottom:12px;word-break:break-word">' + _esc(taskName) + '</div>' +
@@ -22909,35 +22991,76 @@
         function () {
           var remark = ((document.getElementById('doneRemarkEl') || {}).value || '').trim();
           _closeModal();
+
           var circle = row.querySelector('.ck-circle');
           var btn = row.querySelector('.ck-btn');
-          if (circle) circle.style.pointerEvents = 'none';
-          if (btn) {btn.disabled = true; btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Saving…';}
-          row.style.opacity = '0.6';
+
+          // ── Optimistic UI ──────────────────────────────────────
+          row.style.opacity = '0.55';
+          row.style.pointerEvents = 'none';
+          if (circle) {
+            circle.style.pointerEvents = 'none';
+            circle.classList.add('done');
+            circle.innerHTML = '<i class="fas fa-check"></i>';
+          }
+          if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-check"></i> Done';
+          }
+          var statusEl = row.querySelector('.ck-status, .status-badge, [data-status]');
+          if (statusEl) {
+            statusEl.textContent = 'Done';
+            statusEl.className = (statusEl.className || '').replace(/pending|open|todo/gi, '') + ' done';
+          }
+
           _gas('markTaskDone', [rowNum, occ, taskUid, taskName, taskPlanned, date, remark], function (r) {
-            row.style.opacity = '1';
             if (r && r.success === false) {
+              // Rollback
+              row.style.opacity = '';
+              row.style.pointerEvents = '';
+              if (circle) {
+                circle.style.pointerEvents = '';
+                circle.classList.remove('done');
+                circle.innerHTML = '';
+              }
+              if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-check"></i> Done';
+              }
               _toast('❌ ' + (r.error || 'Task update nahi hui'), 'err');
-              if (circle) circle.style.pointerEvents = '';
-              if (btn) {btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> Done';}
+              _loadToday();
             } else {
               _toast('✅ Done!', 'ok');
+              // Soft refresh so KPIs / sort sync
               _loadToday();
             }
           }, function (e) {
-            row.style.opacity = '1';
-            _toast('❌ Error: ' + e.message, 'err');
-            if (circle) circle.style.pointerEvents = '';
-            if (btn) {btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> Done';}
+            // Rollback on network error
+            row.style.opacity = '';
+            row.style.pointerEvents = '';
+            if (circle) {
+              circle.style.pointerEvents = '';
+              circle.classList.remove('done');
+              circle.innerHTML = '';
+            }
+            if (btn) {
+              btn.disabled = false;
+              btn.innerHTML = '<i class="fas fa-check"></i> Done';
+            }
+            _toast('❌ Error: ' + ((e && e.message) || 'Network error'), 'err');
+            _loadToday();
           });
         },
         '<i class="fas fa-check"></i> Mark Done'
       );
-      // Auto-focus remark field
+
       setTimeout(function () {
-        var el = document.getElementById('doneRemarkEl'); if (el) el.focus();
+        var el = document.getElementById('doneRemarkEl');
+        if (el) el.focus();
       }, 180);
     }
+
+
 
     function _editDoneRemark(rowId, currentRemark) {
       var row = document.getElementById(rowId);
@@ -26314,6 +26437,36 @@
       return false;
     };
 
+
+    var _mbnRoutes = {
+      home: 'dash',
+      check: 'check',
+      attend: 'attend',
+      deleg: 'deleg',
+      leave: 'leave',
+      profile: 'profile'   // still works if called from elsewhere
+    };
+
+    function _updateMobNav(activeKey) {
+      var keyMap = {
+        dash: 'home',
+        check: 'check',
+        attend: 'attend',
+        leave: 'leave',
+        deleg: 'deleg',
+        profile: 'profile'
+      };
+      var mapped = keyMap[activeKey] || activeKey;
+      document.querySelectorAll('.mob-nav-item').forEach(function (el) {
+        el.classList.remove('active');
+      });
+      var target = document.getElementById('mbn-' + mapped);
+      if (target) target.classList.add('active');
+      var nav = document.getElementById('mobNav');
+      if (nav) nav.classList.remove('nav-hidden');
+    }
+
+
   </script>
   <!-- ── Mobile Bottom Navigation ── -->
   <nav class="mob-nav" id="mobNav" aria-label="Mobile navigation" style="display:none">
@@ -26334,9 +26487,9 @@
         <span class="mob-nav-pill"><i class="fas fa-people-arrows"></i></span>
         <span>Delegate</span>
       </button>
-      <button class="mob-nav-item" id="mbn-profile" onclick="_mbNav('profile')" aria-label="Profile">
-        <span class="mob-nav-pill"><i class="fas fa-circle-user"></i></span>
-        <span>Profile</span>
+      <button class="mob-nav-item" id="mbn-leave" onclick="_mbNav('leave')" aria-label="Leave">
+        <span class="mob-nav-pill"><i class="fas fa-umbrella-beach"></i></span>
+        <span>Leave</span>
       </button>
     </div>
   </nav>
