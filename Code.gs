@@ -249,23 +249,20 @@ function _extractTimeStr(v) {
   if (v === null || v === undefined || v === '') return '';
   if (v === '-') return '-';
 
-  // ── Date object (Sheets time-formatted cell or corrupted time-only Date) ──
-  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && /Z|[+-]\d{2}:?\d{2}/.test(s)) {
+  // ── Date object (Sheets time cell) ───────────────────────────────────────
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v.getTime())) {
     try {
-      var isoD = new Date(s);
-      if (!isNaN(isoD.getTime())) {
-        return Utilities.formatDate(isoD, 'Asia/Kolkata', 'HH:mm');
-      }
-    } catch (eIso) {}
+      return Utilities.formatDate(v, 'Asia/Kolkata', 'HH:mm');
+    } catch (e) {
+      return '';
+    }
   }
 
-  // ── Number: Excel serial (full date+time or time-only fraction) ──────────
+  // ── Number: Excel serial (full date+time OR time-only fraction) ──────────
   if (typeof v === 'number') {
     var frac = v - Math.floor(v);
-    // Pure integer with no fraction → no usable time
     if (frac < 0.00001) return '';
     var totalMins = Math.round(frac * 1440);
-    // Guard against float noise pushing to 1440
     if (totalMins >= 1440) totalMins = 0;
     var hh = Math.floor(totalMins / 60);
     var mm = totalMins % 60;
@@ -275,7 +272,7 @@ function _extractTimeStr(v) {
   var s = String(v).trim();
   if (!s || s === '-' || s === 'undefined' || s === 'null') return s === '-' ? '-' : '';
 
-  // ── Numeric string from JSON cache ("46257.458" or "0.458") ─────────────
+  // ── Numeric string from cache ("46257.458" or "0.458") ───────────────────
   if (/^\d+(\.\d+)?$/.test(s)) {
     var nv = parseFloat(s);
     var frac2 = nv - Math.floor(nv);
@@ -286,20 +283,29 @@ function _extractTimeStr(v) {
       (tm2 % 60 < 10 ? '0' : '') + (tm2 % 60);
   }
 
-  // ── JS Date.toString() / corrupted GAS: "Sat Dec 30 1899 13:00:00 GMT+0530..." ──
+  // ── ISO with Z / offset → convert to IST ────────────────────────────────
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && /Z|[+-]\d{2}:?\d{2}/.test(s)) {
+    try {
+      var isoD = new Date(s);
+      if (!isNaN(isoD.getTime())) {
+        return Utilities.formatDate(isoD, 'Asia/Kolkata', 'HH:mm');
+      }
+    } catch (eIso) {}
+  }
+
+  // ── "Sat Dec 30 1899 13:00:00 GMT+0530..." ───────────────────────────────
   var gmtM = s.match(/(?:[A-Za-z]{3}\s+){1,2}\d{1,2}\s+\d{4}\s+(\d{1,2}):(\d{2})(?::\d{2})?/);
   if (gmtM) {
     var gh = parseInt(gmtM[1], 10), gm = parseInt(gmtM[2], 10);
     return (gh < 10 ? '0' : '') + gh + ':' + (gm < 10 ? '0' : '') + gm;
   }
-  // Simpler: any "... HH:mm:ss GMT..."
-  var gmt2 = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?\s*(?:GMT|UTC|$)/i);
-  if (gmt2 && s.indexOf('GMT') > -1) {
+  var gmt2 = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?\s*(?:GMT|UTC)/i);
+  if (gmt2) {
     var g2h = parseInt(gmt2[1], 10), g2m = parseInt(gmt2[2], 10);
     return (g2h < 10 ? '0' : '') + g2h + ':' + (g2m < 10 ? '0' : '') + g2m;
   }
 
-  // ── 12-hour with AM/PM: "10:30 AM", "5:05 PM", "10:30AM" ────────────────
+  // ── 12-hour AM/PM: "10:30 AM", "5:05PM" ─────────────────────────────────
   var ampm = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/i);
   if (ampm) {
     var ah = parseInt(ampm[1], 10), am = parseInt(ampm[2], 10);
@@ -309,7 +315,7 @@ function _extractTimeStr(v) {
     return (ah < 10 ? '0' : '') + ah + ':' + (am < 10 ? '0' : '') + am;
   }
 
-  // ── ISO / yyyy-MM-dd HH:mm[:ss]  (also 1899-12-30T... artifacts) ────────
+  // ── "yyyy-MM-dd HH:mm:ss" or "...T..." without Z (already wall-clock) ───
   if (s.length > 10 && (s.charAt(4) === '-' || s.indexOf('T') > 0)) {
     var tIdx = s.indexOf('T') > 0 ? s.indexOf('T') : s.indexOf(' ');
     if (tIdx > 0) {
@@ -322,7 +328,7 @@ function _extractTimeStr(v) {
     }
   }
 
-  // ── AppSheet: "dd/MM/yyyy HH:mm:ss" or "dd/MM/yyyy HH:mm" ───────────────
+  // ── AppSheet: "dd/MM/yyyy HH:mm:ss" ─────────────────────────────────────
   if (/^\d{1,2}\/\d{1,2}\/\d{4}/.test(s)) {
     var sp = s.split(/\s+/);
     if (sp.length >= 2) {
@@ -334,7 +340,7 @@ function _extractTimeStr(v) {
     }
   }
 
-  // ── Plain "HH:mm" or "H:mm" or "HH:mm:ss" ───────────────────────────────
+  // ── Plain "HH:mm" / "H:mm" / "HH:mm:ss" (FORMATTED_VALUE) ───────────────
   var plain = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
   if (plain) {
     var ph = parseInt(plain[1], 10), pm = parseInt(plain[2], 10);
@@ -343,7 +349,7 @@ function _extractTimeStr(v) {
     }
   }
 
-  // Last resort: if string contains something like "13:00" anywhere
+  // Last resort: first HH:mm found in string
   var any = s.match(/(\d{1,2}):(\d{2})/);
   if (any) {
     var xh = parseInt(any[1], 10), xm = parseInt(any[2], 10);
@@ -354,6 +360,7 @@ function _extractTimeStr(v) {
 
   return '';
 }
+
 
 /**
  * Reliable punch times from a Daily-Attendance row.
@@ -3218,9 +3225,10 @@ function _sheetsApiBulkRead(spreadsheetId, sheetName) {
   var label = '[_sheetsApiBulkRead:' + sheetName + ']';
 
   try {
+    // FORMATTED_VALUE = exactly what user sees in Sheets ("10:49", not serial)
     var url = 'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId +
       '/values/' + encodeURIComponent(sheetName) +
-      '?valueRenderOption=UNFORMATTED_VALUE&majorDimension=ROWS';
+      '?valueRenderOption=FORMATTED_VALUE&majorDimension=ROWS';
     var resp = UrlFetchApp.fetch(url, {
       headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
       muteHttpExceptions: true
@@ -3242,7 +3250,8 @@ function _sheetsApiBulkRead(spreadsheetId, sheetName) {
     if (!sh) return [];
     var lr = sh.getLastRow(), lc = sh.getLastColumn();
     if (lr < 1) return [];
-    raw = sh.getRange(1, 1, lr, lc).getValues();
+    // Display values on fallback too (same as UI)
+    raw = sh.getRange(1, 1, lr, lc).getDisplayValues();
     console.log(label + ' SpreadsheetApp fallback fetch: ' + (Date.now() - t1) + 'ms');
   }
   return raw || [];
@@ -5341,30 +5350,36 @@ function _readAttendanceFiltered(from, to, deptFlt, empFlt, statusFlt, deptMap, 
 
   // Build NeedAttendance set & WeekOff day set from Doer List
   var needAttSet = {};
-  var weekOffDayMap = {}; // empId -> day-of-week number (0=Sun, 1=Mon, ... 6=Sat)
+  var weekOffDayMap = {};
   try {
     getSheetData(MASTER_SHEET_ID, 'Doer List').forEach(function (d) {
       var id = String(d['Emp ID'] || '').trim();
       if (!id) return;
       var na = String(d['NeedAttendance'] || '').trim().toLowerCase();
       needAttSet[id] = (na !== 'no');
-      // Parse Week Off Day column
       var wod = d['Week Off Day'];
-      var weekOffDay = 0; // default Sunday
+      var weekOffDay = 0;
       if (wod !== undefined && wod !== null && wod !== '') {
         var wodStr = String(wod).trim().toLowerCase();
-        var dmap = { sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tuesday: 2, wed: 3, wednesday: 3, thu: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6 };
+        var dmap = {
+          sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tuesday: 2,
+          wed: 3, wednesday: 3, thu: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6
+        };
         if (dmap[wodStr] !== undefined) weekOffDay = dmap[wodStr];
-        else { var wn = parseInt(wodStr, 10); if (!isNaN(wn) && wn >= 0 && wn <= 6) weekOffDay = wn; }
+        else {
+          var wn = parseInt(wodStr, 10);
+          if (!isNaN(wn) && wn >= 0 && wn <= 6) weekOffDay = wn;
+        }
       }
       weekOffDayMap[id] = weekOffDay;
     });
-  } catch (e) { console.warn('[_readAttendanceFiltered] needAtt load: ' + e.message); }
-  // Helper — returns true if this employee should be included in attendance reports
+  } catch (e) {
+    console.warn('[_readAttendanceFiltered] needAtt load: ' + e.message);
+  }
+
   function _needsAtt(eid) {
     return needAttSet.hasOwnProperty(eid) ? needAttSet[eid] : true;
   }
-  // Helper — returns the weekly off day-of-week for an employee (default 0 = Sunday)
   function _empWeekOffDay(eid) {
     return weekOffDayMap.hasOwnProperty(eid) ? weekOffDayMap[eid] : 0;
   }
@@ -5379,44 +5394,68 @@ function _readAttendanceFiltered(from, to, deptFlt, empFlt, statusFlt, deptMap, 
   var iCheckOut = hdrs.indexOf('check_out');
   var iHours = hdrs.indexOf('total_hours');
   var iStatus = hdrs.indexOf('status');
+  // device timestamps — more reliable than time-only cells
+  var iCiDev = hdrs.indexOf('check_in_device_ts');
+  var iCoDev = hdrs.indexOf('check_out_device_ts');
+  var iDevTs = hdrs.indexOf('device_ts');
 
   officeMap = officeMap || {};
 
   var out = [];
-  var seen = {}; // "empId|date" -> true, used below to know which days already have a real record
+  var seen = {};
+
   for (var i = 1; i < raw.length; i++) {
     var r = raw[i];
     var eid = String(r[iEmpId] || '').trim();
     if (!eid) continue;
-    if (!_needsAtt(eid)) continue; // NeedAttendance=No — skip from all reports
+    if (!_needsAtt(eid)) continue;
 
-    var date = _normDateSafe(r[iDate]); // handles numeric serials, Date objects, dd/MM/yyyy, yyyy-MM-dd
+    var date = _normDateSafe(r[iDate]);
     if (!date) continue;
-    seen[eid + '|' + date] = true; // mark as having a real record regardless of range, so synthesis below never double-counts a day outside [from,to] either
+    seen[eid + '|' + date] = true;
     if (date < from || date > to) continue;
 
     var dept = String(r[iDept] || deptMap[eid] || 'Other').trim();
     if (deptFlt !== 'all' && dept !== deptFlt) continue;
     if (empFlt !== 'all' && eid !== empFlt) continue;
 
+    // ── Correct punch times via helper (device_ts preferred) ───────────────
+    var rowObj = {
+      check_in: iCheckIn >= 0 ? r[iCheckIn] : '',
+      check_out: iCheckOut >= 0 ? r[iCheckOut] : '',
+      check_in_device_ts: iCiDev >= 0 ? r[iCiDev] : '',
+      check_out_device_ts: iCoDev >= 0 ? r[iCoDev] : '',
+      device_ts: iDevTs >= 0 ? r[iDevTs] : ''
+    };
+    var times = _attTimesFromRow(rowObj);
+    var ci = times.check_in;
+    var co = times.check_out;
+
+    // Hours: prefer recalculated from corrected IN/OUT
     var hoursVal = r[iHours];
+    if (ci && ci !== '-' && co && co !== '-') {
+      try {
+        var ciP = ci.split(':');
+        var coP = co.split(':');
+        var diffM = (parseInt(coP[0], 10) * 60 + parseInt(coP[1], 10)) -
+                    (parseInt(ciP[0], 10) * 60 + parseInt(ciP[1], 10));
+        if (diffM > 0) {
+          hoursVal = Math.floor(diffM / 60) + 'h ' +
+            (diffM % 60 < 10 ? '0' : '') + (diffM % 60) + 'm';
+        }
+      } catch (eH) { }
+    }
+
     var raw_st = String(r[iStatus] || '').trim();
     var st = _normAttStatus(raw_st);
 
-    // Re-derive Present vs Half Day from actual worked hours whenever we
-    // have a reliable hours figure, rather than trusting whatever the
-    // status string says. Each employee's OWN office duration (from the
-    // Doer List's Office IN/Office OUT columns) is used when available —
-    // Full Day = worked hours >= 80% of that employee's own shift length;
-    // otherwise falls back to the flat company-wide HALF_DAY_THRESHOLD_HRS
-    // config for employees who haven't had a personal shift time set.
+    // Re-derive P vs HD from worked hours
     var parsedHrsOut = null, fullDayThreshOut = null, halfDayThreshOut = null, hoursShortOut = null;
     if (hdThresh && (st === 'P' || st === 'HD')) {
       var parsedHrs = _parseHoursStr(hoursVal);
       if (!isNaN(parsedHrs) && parsedHrs > 0) {
         var off = officeMap[eid];
         var expHrs = off ? off.expectedHrs : (hdThresh / 0.65);
-        // 3-tier: >=75% = Full Day, >=40% = Half Day, <40% = Short (HD but flagged)
         var fullDayThreshHrs = expHrs * 0.75;
         var halfDayThreshHrs = expHrs * 0.40;
         if (parsedHrs >= fullDayThreshHrs) { st = 'P'; }
@@ -5436,8 +5475,8 @@ function _readAttendanceFiltered(from, to, deptFlt, empFlt, statusFlt, deptMap, 
       name: r[iEmpName] || nameMap[eid] || eid,
       dept: dept,
       date: date,
-      check_in: _extractTimeStr(r[iCheckIn]),
-      check_out: _extractTimeStr(r[iCheckOut]),
+      check_in: ci,
+      check_out: co,
       total_hours: hoursVal,
       status: st,
       parsed_hours: parsedHrsOut,
@@ -5447,33 +5486,31 @@ function _readAttendanceFiltered(from, to, deptFlt, empFlt, statusFlt, deptMap, 
     });
   }
 
-  // ── Synthesize Absent records for working days with no check-in ─────────
-  // recordCheckOut/check-in only ever write a row when someone actually
-  // shows up — a day nobody checked in simply has no row at all, so a
-  // genuine absence was never being counted anywhere downstream (KPIs,
-  // dept breakdown, employee cards all showed 0 Absent regardless of
-  // reality). This walks every employee × every working day in range and
-  // fills in 'A' for any combination with no existing record, skipping
-  // Sundays and Holiday List dates, and never marking a future date absent.
+  // Synthesize Absent for working days with no check-in
   if (holSet && (statusFlt === 'all' || statusFlt === 'A')) {
     var capTo = (todayStr && todayStr < to) ? todayStr : to;
     if (capTo >= from) {
       Object.keys(nameMap).forEach(function (eid) {
-        if (!_needsAtt(eid)) return; // NeedAttendance=No — never synthesize Absent rows
+        if (!_needsAtt(eid)) return;
         var dept = String(deptMap[eid] || 'Other').trim();
         if (deptFlt !== 'all' && dept !== deptFlt) return;
         if (empFlt !== 'all' && eid !== empFlt) return;
         var d = new Date(from + 'T00:00:00');
         var endD = new Date(capTo + 'T00:00:00');
-        var empWOD = _empWeekOffDay(eid); // per-employee weekly off day (0=Sun default)
+        var empWOD = _empWeekOffDay(eid);
         while (d <= endD) {
           var dateStr = Utilities.formatDate(d, 'Asia/Kolkata', 'yyyy-MM-dd');
           var dow = d.getDay();
-          // Skip the employee's weekly off day (per-employee, not hardcoded Sunday)
           if (dow !== empWOD && !holSet[dateStr] && !seen[eid + '|' + dateStr]) {
             out.push({
-              emp_id: eid, name: nameMap[eid] || eid, dept: dept, date: dateStr,
-              check_in: '-', check_out: '-', total_hours: '-', status: 'A'
+              emp_id: eid,
+              name: nameMap[eid] || eid,
+              dept: dept,
+              date: dateStr,
+              check_in: '-',
+              check_out: '-',
+              total_hours: '-',
+              status: 'A'
             });
           }
           d.setDate(d.getDate() + 1);
