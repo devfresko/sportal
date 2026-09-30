@@ -16880,6 +16880,99 @@
       }, function (e) {sumEl.innerHTML = (e && e.message && e.message.indexOf('Network') > -1) ? '<div style="text-align:center;padding:24px"><div style="font-size:28px;margin-bottom:8px">📡</div><div style="font-weight:700;color:var(--tx);margin-bottom:4px">Connection Error</div><div style="font-size:12px;color:var(--tx2);margin-bottom:12px">Server se connect nahi ho pa raha</div><button class="btn btn-sm" onclick="_forceRefresh()"><i class="fas fa-rotate-right"></i> Retry</button></div>' : '<div class="te">' + _esc(e.message) + '</div>';});
     }
 
+    // My Attendance sort state
+    var _myAttSortKey = 'date';
+    var _myAttSortDir = 'desc'; // date default: newest first
+
+    function _myAttSort(key) {
+      if (_myAttSortKey === key) {
+        _myAttSortDir = (_myAttSortDir === 'asc') ? 'desc' : 'asc';
+      } else {
+        _myAttSortKey = key;
+        // sensible default direction per column
+        _myAttSortDir = (key === 'date' || key === 'hours') ? 'desc' : 'asc';
+      }
+      if (!_D.myAtt) return;
+      var sumEl = document.getElementById('amySum');
+      var tblEl = document.getElementById('amyTable');
+      var month = document.getElementById('amyMonth')
+        ? document.getElementById('amyMonth').value
+        : _currMonth();
+      if (sumEl && tblEl) _renderMyAtt(_D.myAtt, sumEl, tblEl, month);
+    }
+
+    function _myAttSortedRecords(recs) {
+      var key = _myAttSortKey || 'date';
+      var dir = _myAttSortDir === 'asc' ? 1 : -1;
+      var arr = (recs || []).slice();
+
+      function mins(t) {
+        if (!t || t === '-') return -1;
+        var p = String(t).split(':');
+        var h = parseInt(p[0], 10), m = parseInt(p[1], 10);
+        if (isNaN(h)) return -1;
+        return h * 60 + (isNaN(m) ? 0 : m);
+      }
+      function hrsNum(h) {
+        if (!h || h === '-') return -1;
+        var s = String(h);
+        var m = s.match(/(\d+)\s*h/i);
+        var n = s.match(/(\d+)\s*m/i);
+        var total = 0;
+        if (m) total += parseInt(m[1], 10) * 60;
+        if (n) total += parseInt(n[1], 10);
+        if (!m && !n) {
+          var f = parseFloat(s);
+          return isNaN(f) ? -1 : f * 60;
+        }
+        return total;
+      }
+      function statusRank(st) {
+        var map = {
+          'Present': 1, 'Half Day': 2, 'Absent': 3,
+          'Holiday': 4, 'Week Off': 5
+        };
+        return map[st] || 9;
+      }
+
+      arr.sort(function (a, b) {
+        var av, bv;
+        if (key === 'date') {
+          av = String(a.date || '');
+          bv = String(b.date || '');
+          return av < bv ? -dir : av > bv ? dir : 0;
+        }
+        if (key === 'in') {
+          av = mins(a.check_in || a.punch_in);
+          bv = mins(b.check_in || b.punch_in);
+          return (av - bv) * dir;
+        }
+        if (key === 'out') {
+          av = mins(a.check_out || a.punch_out);
+          bv = mins(b.check_out || b.punch_out);
+          return (av - bv) * dir;
+        }
+        if (key === 'hours') {
+          av = hrsNum(a.total_hours);
+          bv = hrsNum(b.total_hours);
+          return (av - bv) * dir;
+        }
+        if (key === 'status') {
+          av = statusRank(a.status);
+          bv = statusRank(b.status);
+          return (av - bv) * dir;
+        }
+        if (key === 'late') {
+          av = a.is_late ? 1 : 0;
+          bv = b.is_late ? 1 : 0;
+          return (av - bv) * dir;
+        }
+        return 0;
+      });
+      return arr;
+    }
+
+
     function _renderMyAtt(data, sumEl, tblEl, month) {
       var s = (data && data.summary) || {};
       sumEl.innerHTML =
@@ -16892,7 +16985,8 @@
           ['Holidays', 'holiday', '#4338ca'],
           ['Week Off', 'week_off', 'var(--tx2)']
         ].map(function (k) {
-          return '<div class="att-kpi"><div class="val" style="color:' + k[2] + '">' + (s[k[1]] || 0) + '</div><div class="lbl">' + k[0] + '</div></div>';
+          return '<div class="att-kpi"><div class="val" style="color:' + k[2] + '">' +
+            (s[k[1]] || 0) + '</div><div class="lbl">' + k[0] + '</div></div>';
         }).join('') +
         '</div>';
 
@@ -16902,14 +16996,39 @@
         return;
       }
 
+      var sorted = _myAttSortedRecords(recs);
+      var key = _myAttSortKey || 'date';
+      var dir = _myAttSortDir === 'asc' ? '↑' : '↓';
+
+      function sortBtn(id, label, icon) {
+        var active = (key === id);
+        return '<button type="button" onclick="_myAttSort(\'' + id + '\')" ' +
+          'style="padding:5px 10px;border-radius:8px;font-size:11.5px;font-weight:700;cursor:pointer;' +
+          'border:1.5px solid ' + (active ? 'var(--P)' : 'var(--bdr)') + ';' +
+          'background:' + (active ? 'var(--Pl)' : 'var(--bg)') + ';' +
+          'color:' + (active ? 'var(--P)' : 'var(--tx2)') + '">' +
+          (icon ? '<i class="fas ' + icon + '" style="font-size:10px;margin-right:4px"></i>' : '') +
+          label + (active ? ' ' + dir : '') +
+          '</button>';
+      }
+
       tblEl.innerHTML =
+        '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px;padding:0 2px">' +
+        '<span style="font-size:10.5px;font-weight:800;color:var(--tx3);text-transform:uppercase;letter-spacing:.4px;margin-right:4px">Sort:</span>' +
+        sortBtn('date', 'Date', 'fa-calendar') +
+        sortBtn('in', 'Punch IN', 'fa-sign-in-alt') +
+        sortBtn('out', 'Punch OUT', 'fa-sign-out-alt') +
+        sortBtn('hours', 'Hours', 'fa-clock') +
+        sortBtn('status', 'Status', 'fa-tag') +
+        sortBtn('late', 'Late', 'fa-hourglass-half') +
+        '</div>' +
         '<div class="table-card"><div class="tw"><table><thead><tr>' +
         '<th>Date</th><th>Day</th>' +
         '<th style="color:var(--G)"><i class="fas fa-sign-in-alt"></i> Punch IN</th>' +
         '<th style="color:var(--R)"><i class="fas fa-sign-out-alt"></i> Punch OUT</th>' +
         '<th>Hours</th><th>Status</th><th>Punctuality</th>' +
         '</tr></thead><tbody>' +
-        recs.map(function (r) {
+        sorted.map(function (r) {
           var stBg = (r.status === 'Present') ? 'var(--Gl)'
             : (r.status === 'Absent') ? 'var(--Rl)'
               : (r.status === 'Half Day') ? 'var(--Ol)'
