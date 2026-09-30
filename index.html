@@ -11434,10 +11434,84 @@
     var _V = null;   // Current view name
     var _ST = null;   // Current sub-tab
     var _D = {};
-    var _LC_KEY = 'fk_data_v1', _LC_TTL = 4 * 60 * 60 * 1000;
-    function _lcSave() {try {localStorage.setItem(_LC_KEY, JSON.stringify({ts: Date.now(), d: {dashStats: _D.dashStats || null, todayAtt: _D.todayAtt || null, todayTasks: _D.todayTasks || null, announcements: _D.announcements || null, leaveBalance: _D.leaveBalance || null, holidays: _D.holidays || null, myDelegations: _D.myDelegations || null, celebrations: _D.celebrations || null, appConfig: _D.appConfig || null}}));} catch (e) { } }
-    function _lcLoad() {try {var r = localStorage.getItem(_LC_KEY); if (!r) return false; var p = JSON.parse(r); if (!p || !p.ts || (Date.now() - p.ts) > _LC_TTL) return false; var d = p.d; if (d.dashStats) _D.dashStats = d.dashStats; if (d.todayAtt) _D.todayAtt = d.todayAtt; if (d.todayTasks) _D.todayTasks = d.todayTasks; if (d.announcements) _D.announcements = d.announcements; if (d.leaveBalance) _D.leaveBalance = d.leaveBalance; if (d.holidays) _D.holidays = d.holidays; if (d.myDelegations) _D.myDelegations = d.myDelegations; if (d.celebrations) _D.celebrations = d.celebrations; if (d.appConfig) _D.appConfig = d.appConfig; _D.lastFetch = p.ts; return true;} catch (e) {return false;} }
-    function _lcClear() {try {localStorage.removeItem(_LC_KEY);} catch (e) { } }
+    var _LC_KEY = 'fk_data_v2';
+    // Different TTLs: today data short, config/holidays long
+    var _LC_TTL_TODAY = 8 * 60 * 1000;      // 8 min for todayAtt / todayTasks / dashStats
+    var _LC_TTL_LONG = 6 * 60 * 60 * 1000; // 6 hours for config, holidays, celebrations
+
+    function _lcSave() {
+      try {
+        var payload = {
+          ts: Date.now(),
+          d: {
+            dashStats: _D.dashStats || null,
+            todayAtt: _D.todayAtt || null,
+            todayTasks: _D.todayTasks || null,
+            announcements: _D.announcements || null,
+            leaveBalance: _D.leaveBalance || null,
+            holidays: _D.holidays || null,
+            myDelegations: _D.myDelegations || null,
+            myDelegationsMine: _D.myDelegationsMine || null,
+            myDelegatedOut: _D.myDelegatedOut || null,
+            celebrations: _D.celebrations || null,
+            appConfig: _D.appConfig || null,
+            myAtt: _D.myAtt || null,
+            myAttMonth: _D.myAttMonth || null
+          }
+        };
+        localStorage.setItem(_LC_KEY, JSON.stringify(payload));
+      } catch (e) { }
+    }
+
+    function _lcLoad() {
+      try {
+        var r = localStorage.getItem(_LC_KEY);
+        if (!r) return false;
+        var p = JSON.parse(r);
+        if (!p || !p.ts) return false;
+
+        var age = Date.now() - p.ts;
+        var d = p.d || {};
+        var hasUseful = false;
+
+        // Long-lived data
+        if (age < _LC_TTL_LONG) {
+          if (d.holidays) {_D.holidays = d.holidays; hasUseful = true;}
+          if (d.celebrations) {_D.celebrations = d.celebrations; hasUseful = true;}
+          if (d.appConfig) {_D.appConfig = d.appConfig; hasUseful = true;}
+          if (d.leaveBalance) {_D.leaveBalance = d.leaveBalance; hasUseful = true;}
+        }
+
+        // Today / dashboard data (shorter TTL)
+        if (age < _LC_TTL_TODAY) {
+          if (d.dashStats) {_D.dashStats = d.dashStats; hasUseful = true;}
+          if (d.todayAtt) {_D.todayAtt = d.todayAtt; hasUseful = true;}
+          if (d.todayTasks) {_D.todayTasks = d.todayTasks; hasUseful = true;}
+          if (d.announcements) {_D.announcements = d.announcements; hasUseful = true;}
+          if (d.myDelegations) {_D.myDelegations = d.myDelegations; hasUseful = true;}
+          if (d.myDelegationsMine) {_D.myDelegationsMine = d.myDelegationsMine; hasUseful = true;}
+          if (d.myDelegatedOut) {_D.myDelegatedOut = d.myDelegatedOut; hasUseful = true;}
+        }
+
+        // Attendance (month-specific)
+        if (age < _LC_TTL_TODAY && d.myAtt && d.myAttMonth) {
+          _D.myAtt = d.myAtt;
+          _D.myAttMonth = d.myAttMonth;
+          hasUseful = true;
+        }
+
+        if (hasUseful) {
+          _D.lastFetch = p.ts;
+          return true;
+        }
+        return false;
+      } catch (e) {return false;}
+    }
+
+    function _lcClear() {
+      try {localStorage.removeItem(_LC_KEY);} catch (e) { }
+    }
+
     var _refreshTimer = null;   // background auto-refresh interval handle
     var _AUTO_REFRESH_MS = 90000; // 90s — balance between freshness and GAS quota
 
@@ -12751,16 +12825,33 @@
 
 
 
-
-
-
       window._fkLoaded = false;
       window._fkBootFailed = false;
 
+      // ── SWR: pehle cache se turant dikhao ──────────────────────────────
+      var hadCache = _lcLoad();
+      if (hadCache && _D.dashStats) {
+        // Cache mila → splash jaldi hatao aur dashboard dikhao
+        window._fkLoaded = true;
+        if (window._fkSplashHardTimer) {
+          clearTimeout(window._fkSplashHardTimer);
+          window._fkSplashHardTimer = null;
+        }
+        _hideSplash();
+        _loadV(window._pwaStartRoute || 'dash');
+        window._pwaStartRoute = null;
+        if (_updateMobNav) _updateMobNav('home');
+        _startAutoRefresh();
+        // Note: network call ab bhi background mein chalega
+      }
+
+      // ── Network call (always) ──────────────────────────────────────────
       _gasX('getBootData', [], 30000, function (d) {
         if (!d) {
-          _hideSplash();
-          _showBootError('Empty response from server');
+          if (!hadCache) {
+            _hideSplash();
+            _showBootError('Empty response from server');
+          }
           return;
         }
 
@@ -12778,6 +12869,7 @@
           if (_U && _TOKEN) _saveSession(_U, _TOKEN);
         }
         _D.lastFetch = Date.now();
+        _lcSave();   // ← cache update
 
         var badge = document.getElementById('annBadge');
         if (badge && d.announcements && d.announcements.length > 0) {
@@ -12785,21 +12877,37 @@
           badge.style.display = '';
         }
 
-        window._fkBootFailed = false;
-        window._fkLoaded = true;
-        if (window._fkSplashHardTimer) {
-          clearTimeout(window._fkSplashHardTimer);
-          window._fkSplashHardTimer = null;
+        // Agar pehle se cache se load ho chuka hai to sirf silent re-render
+        if (hadCache && window._fkLoaded) {
+          var cur = window._curView || 'dash';
+          if (cur === 'dash') {
+            _loadV('dash');          // soft refresh of current view
+          }
+        } else {
+          // Pehli baar network se aaya
+          window._fkBootFailed = false;
+          window._fkLoaded = true;
+          if (window._fkSplashHardTimer) {
+            clearTimeout(window._fkSplashHardTimer);
+            window._fkSplashHardTimer = null;
+          }
+          _hideSplash();
+          _loadV(window._pwaStartRoute || 'dash');
+          window._pwaStartRoute = null;
+          if (_updateMobNav) _updateMobNav('home');
+          _startAutoRefresh();
         }
-        _hideSplash();
-        _loadV(window._pwaStartRoute || 'dash');
-        window._pwaStartRoute = null;
-        if (_updateMobNav) _updateMobNav('home');
-        _startAutoRefresh();
 
         _bootLoadBackground();
 
       }, function (err) {
+        // existing error / fallback logic yahan same rahega
+        // bas ek cheez add karo:
+        if (hadCache && window._fkLoaded) {
+          // Cache se already chal raha hai → silent fail, user ko disturb mat karo
+          return;
+        }
+        // baaki purana error handling...
         // Fallback: agar getBootData unknown ho (purana deploy) to light path try
         var msg = (err && err.message) ? err.message : '';
         if (msg.indexOf('Unknown action') > -1) {
@@ -15391,13 +15499,20 @@
       if (list) list.innerHTML = _skel(3, 'sk-h5');
 
       // Use cache if available — just re-apply filter
-      if (_D.myDelegationsMine) {_dApplyFilter('dmine'); return;}
+      // Naya (SWR):
+      if (_D.myDelegationsMine) {
+        _dApplyFilter('dmine');
+        // background refresh continue karega neeche
+      } else {
+        if (list) list.innerHTML = _skel(3, 'sk-h5');
+      }
 
       _gas('getMyDelegations', ['All'], function (dels) {
         _D.myDelegationsMine = dels;
+        _lcSave();
         _dApplyFilter('dmine');
       }, function (e) {
-        if (list) list.innerHTML = e && e.message && e.message.indexOf('Network') > -1
+        if (!_D.myDelegationsMine && list) list.innerHTML = e && e.message && e.message.indexOf('Network') > -1
           ? '<div style="text-align:center;padding:32px 16px"><div style="font-size:32px;margin-bottom:10px">📡</div>' +
           '<div style="font-size:14px;font-weight:800;color:var(--tx);margin-bottom:4px">Connection Error</div>' +
           '<button class="btn btn-sm" onclick="_forceRefresh()"><i class="fas fa-rotate-right"></i> Retry</button></div>'
@@ -15416,13 +15531,20 @@
       var list = document.getElementById('doutList');
       if (list) list.innerHTML = _skel(3, 'sk-h5');
 
-      if (_D.myDelegatedOut) {_dApplyFilter('dout'); return;}
+      // Naya (SWR):
+      if (_D.myDelegationsMine) {
+        _dApplyFilter('dmine');
+        // background refresh continue karega neeche
+      } else {
+        if (list) list.innerHTML = _skel(3, 'sk-h5');
+      }
 
-      _gas('getMyDelegatedOut', ['All'], function (dels) {
-        _D.myDelegatedOut = dels;
-        _dApplyFilter('dout');
+      _gas('getMyDelegations', ['All'], function (dels) {
+        _D.myDelegationsMine = dels;
+        _lcSave();
+        _dApplyFilter('dmine');
       }, function (e) {
-        if (list) list.innerHTML = e && e.message && e.message.indexOf('Network') > -1
+        if (!_D.myDelegationsMine && list) list.innerHTML = e && e.message && e.message.indexOf('Network') > -1
           ? '<div style="text-align:center;padding:32px 16px"><div style="font-size:32px;margin-bottom:10px">📡</div>' +
           '<div style="font-size:14px;font-weight:800;color:var(--tx);margin-bottom:4px">Connection Error</div>' +
           '<button class="btn btn-sm" onclick="_forceRefresh()"><i class="fas fa-rotate-right"></i> Retry</button></div>'
@@ -16880,17 +17002,36 @@
         '<i class="fas fa-rotate-right"></i> Refresh</button>' +
         '</div><div id="amySum"></div><div id="amyTable"></div>';
     }
+
+
     function _loadMyAtt() {
       var month = document.getElementById('amyMonth') ? document.getElementById('amyMonth').value : _currMonth();
       var sumEl = document.getElementById('amySum');
       var tblEl = document.getElementById('amyTable');
       if (!sumEl || !tblEl) return;
-      // Always fetch fresh — no cache (attendance data changes on every check-in/out)
-      sumEl.innerHTML = _skel(1, 'sk-h6'); tblEl.innerHTML = '';
+
+      // SWR: agar same month ka cache hai to turant dikhao
+      if (_D.myAtt && _D.myAttMonth === month) {
+        _renderMyAtt(_D.myAtt, sumEl, tblEl, month);
+      } else {
+        sumEl.innerHTML = _skel(1, 'sk-h6');
+        tblEl.innerHTML = '';
+      }
+
+      // Background refresh (always)
       _gas('getMyAttendance', [_U.emp_code, month], function (data) {
         _D.myAtt = data;
+        _D.myAttMonth = month;
+        _lcSave();
         _renderMyAtt(data, sumEl, tblEl, month);
-      }, function (e) {sumEl.innerHTML = (e && e.message && e.message.indexOf('Network') > -1) ? '<div style="text-align:center;padding:24px"><div style="font-size:28px;margin-bottom:8px">📡</div><div style="font-weight:700;color:var(--tx);margin-bottom:4px">Connection Error</div><div style="font-size:12px;color:var(--tx2);margin-bottom:12px">Server se connect nahi ho pa raha</div><button class="btn btn-sm" onclick="_forceRefresh()"><i class="fas fa-rotate-right"></i> Retry</button></div>' : '<div class="te">' + _esc(e.message) + '</div>';});
+      }, function (e) {
+        // Sirf tab error dikhao jab cache nahi tha
+        if (!(_D.myAtt && _D.myAttMonth === month)) {
+          sumEl.innerHTML = (e && e.message && e.message.indexOf('Network') > -1)
+            ? '<div style="text-align:center;padding:24px"><div style="font-size:28px;margin-bottom:8px">📡</div><div style="font-weight:700;color:var(--tx);margin-bottom:4px">Connection Error</div><div style="font-size:12px;color:var(--tx2);margin-bottom:12px">Server se connect nahi ho pa raha</div><button class="btn btn-sm" onclick="_loadMyAtt()"><i class="fas fa-rotate-right"></i> Retry</button></div>'
+            : '<div class="te">' + _esc(e.message) + '</div>';
+        }
+      });
     }
 
     // My Attendance sort state
