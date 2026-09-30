@@ -12985,17 +12985,17 @@
         if (c) _D.celebrations = c;
       }, function () { });
 
-      // 7) Manager-only: directory + analytics (delayed)
-      if (_isManager && _isManager()) {
-        _gas('getEmployeeDirectory', [], function (dir) {
-          if (dir) _D.empDir = dir;
-        }, function () { });
-        setTimeout(function () {
-          _gas('getAnalyticsSummary', [null], function (s) {
-            _D.analyticsSummary = s;
-          }, function () { });
-        }, 2500);
-      }
+      // // 7) Manager-only: directory + analytics (delayed)
+      // if (_isManager && _isManager()) {
+      //   _gas('getEmployeeDirectory', [], function (dir) {
+      //     if (dir) _D.empDir = dir;
+      //   }, function () { });
+      //   setTimeout(function () {
+      //     _gas('getAnalyticsSummary', [null], function (s) {
+      //       _D.analyticsSummary = s;
+      //     }, function () { });
+      //   }, 2500);
+      // }
     }
 
 
