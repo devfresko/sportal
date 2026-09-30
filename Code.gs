@@ -2667,30 +2667,83 @@ function createDelegation(taskObj, passedUser) {
   return { success: true, task_id: taskId };
 }
 
-function updateDelegationStatus(taskId, status, passedUser) {
+function updateDelegationStatus(taskId, status, remark, passedUser) {
+  // remark optional — old clients may omit (passedUser shifts)
+  if (arguments.length === 3) {
+    // updateDelegationStatus(taskId, status, passedUser)
+    passedUser = remark;
+    remark = '';
+  }
+
   var user = verifyUser(passedUser);
   if (!user) throw new Error('NOT_AUTHENTICATED');
-  var upd = { 'Status': status, 'Timestamp': getISTTimestamp() };
-  if (status === 'Completed') upd['Final Date'] = getISTDate();
-  updateRowByField(MASTER_SHEET_ID, 'Delegation', 'Task ID', taskId, upd);
-  // WA: notify delegator when task completed
-  if (status === 'Completed') {
-    try {
-      var dels = getSheetData(MASTER_SHEET_ID, 'Delegation');
-      var del = null;
-      for (var di = 0; di < dels.length; di++) {
-        if (String(dels[di]['Task ID'] || '') === String(taskId)) { del = dels[di]; break; }
-      }
-      if (del) {
-        var doneMsg = '✅ *Task Completed*\n' +
-          'Task: ' + String(del['Task'] || '') + '\n' +
-          'Completed by: ' + String(user['Name'] || '') + '\n' +
-          'On: ' + getISTDate() + '\n' +
-          'Check Fresko Staff Portal for details.';
-        _waSend(String(del['Delegated By'] || ''), doneMsg);
-      }
-    } catch (e) { Logger.log('[WA] taskCompleted error: ' + e.message); }
+
+  var empCode = _myCode(user);
+  var today = getISTDate();
+  var dels = getSheetData(MASTER_SHEET_ID, 'Delegation');
+  var del = null;
+  for (var i = 0; i < dels.length; i++) {
+    if (String(dels[i]['Task ID'] || '') === String(taskId)) {
+      del = dels[i];
+      break;
+    }
   }
+  if (!del) throw new Error('Task not found');
+
+  var to = String(del['Delegated To'] || '').trim();
+  var by = String(del['Delegated By'] || '').trim();
+  var curStatus = String(del['Status'] || '').trim();
+  var isManagerUser = isManager(user);
+  var isAssignee = (to === empCode);
+  var isDelegator = (by === empCode);
+
+  if (!isAssignee && !isDelegator && !isManagerUser) {
+    throw new Error('PERMISSION_DENIED');
+  }
+
+  // Re-open Completed → only same calendar day as completion
+  if (curStatus === 'Completed' && status !== 'Completed') {
+    var completedOn = _normDateSafe(del['Final Date'] || del['Timestamp'] || '');
+    if (!completedOn || completedOn !== today) {
+      throw new Error('DONE_LOCKED: Sirf complete kiye hue din hi status wapas change ho sakta hai.');
+    }
+    if (!isAssignee && !isManagerUser) {
+      throw new Error('PERMISSION_DENIED');
+    }
+  }
+
+  var upd = {
+    'Status': status,
+    'Timestamp': getISTTimestamp()
+  };
+
+  if (status === 'Completed') {
+    upd['Final Date'] = today;
+  }
+  // Re-open: clear completion date
+  if (curStatus === 'Completed' && status !== 'Completed') {
+    upd['Final Date'] = '';
+  }
+
+  if (remark !== undefined && remark !== null && String(remark).trim() !== '') {
+    upd['Remark'] = String(remark).trim();
+  }
+
+  updateRowByField(MASTER_SHEET_ID, 'Delegation', 'Task ID', taskId, upd);
+
+  if (status === 'Completed' && curStatus !== 'Completed') {
+    try {
+      var doneMsg = '✅ *Task Completed*\n' +
+        'Task: ' + String(del['Task'] || '') + '\n' +
+        'Completed by: ' + String(user['Name'] || '') + '\n' +
+        'On: ' + today + '\n' +
+        'Check Fresko Staff Portal for details.';
+      _waSend(String(del['Delegated By'] || ''), doneMsg);
+    } catch (e) {
+      Logger.log('[WA] taskCompleted error: ' + e.message);
+    }
+  }
+
   return { success: true };
 }
 
@@ -2741,11 +2794,11 @@ function getMyAttendance(empId, monthYear, passedUser) {
   var empCode = empId || _myCode(user);
   if (empCode !== _myCode(user) && !isManager(user)) throw new Error('PERMISSION_DENIED');
 
-  // Thresholds + office hours for late check
   var hdThresh = _cfgNum('HALF_DAY_THRESHOLD_HRS', 6.0);
   var fullDayThreshHrs = hdThresh;
   var officeIn = getConfig('WORK_START_TIME', '10:00') || '10:00';
   var lateThresh = parseInt(getConfig('LATE_THRESHOLD_MINS', '15'), 10) || 15;
+  var todayIST = getISTDate();
 
   try {
     var doers = getSheetData(MASTER_SHEET_ID, 'Doer List');
@@ -2757,7 +2810,7 @@ function getMyAttendance(empId, monthYear, passedUser) {
         if (offIn && offOut) {
           var expHrs = _hoursBetween(offIn, offOut);
           if (!isNaN(expHrs) && expHrs >= 3 && expHrs <= 14) {
-            fullDayThreshHrs = expHrs * 0.65;
+            fullDayThreshHrs = expHrs * 0.75;
           }
         }
         break;
@@ -2767,7 +2820,6 @@ function getMyAttendance(empId, monthYear, passedUser) {
     console.warn('[getMyAttendance] Doer List read: ' + eDl.message);
   }
 
-  // Read from Daily-Attendance
   var daily = getSheetData(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance');
   var recs = daily.filter(function (a) {
     if (String(a['emp_id'] || '') !== String(empCode)) return false;
@@ -2793,7 +2845,6 @@ function getMyAttendance(empId, monthYear, passedUser) {
     var ci = times.check_in;
     var co = times.check_out;
 
-    // Recalculate total hours from punch times
     var calculatedHours = '-';
     var calculatedHrsNum = 0;
     if (ci && ci !== '-' && co && co !== '-') {
@@ -2825,7 +2876,6 @@ function getMyAttendance(empId, monthYear, passedUser) {
       }
     }
 
-    // Status
     var rawStatus = String(r['status'] || '').trim();
     var st = _normAttStatus(rawStatus);
     if ((st === 'P' || st === 'HD') && calculatedHrsNum > 0) {
@@ -2833,6 +2883,13 @@ function getMyAttendance(empId, monthYear, passedUser) {
     } else if (!rawStatus || st === 'A') {
       if (ci && ci !== '-') st = 'P';
     }
+
+    // Past day: checked in, no punch-out → Half Day
+    var recDate = _normDateSafe(r['date'] || '');
+    if (recDate && recDate < todayIST && ci && ci !== '-' && (!co || co === '-')) {
+      st = 'HD';
+    }
+
     var statusLabel = st === 'P' ? 'Present'
       : st === 'HD' ? 'Half Day'
       : st === 'A' ? 'Absent'
@@ -2840,7 +2897,12 @@ function getMyAttendance(empId, monthYear, passedUser) {
       : st === 'WO' ? 'Week Off'
       : (rawStatus || '-');
 
-    // Late = punch IN after Office IN + threshold (Present / Half Day only)
+    var halfDayReason = '';
+    if (st === 'HD') {
+      if (!co || co === '-') halfDayReason = 'No punch-out';
+      else halfDayReason = 'Short hours';
+    }
+
     var isLate = false;
     if ((st === 'P' || st === 'HD') && ci && ci !== '-') {
       isLate = _isLateCheckIn(ci, officeIn, lateThresh);
@@ -2867,7 +2929,8 @@ function getMyAttendance(empId, monthYear, passedUser) {
       break_hours: '-',
       status: statusLabel,
       is_late: isLate,
-      office_in: officeIn
+      office_in: officeIn,
+      half_day_reason: halfDayReason
     };
   });
 
@@ -3029,7 +3092,7 @@ function getMusterGrid(dept, monthYear, passedUser) {
       var parsedHrs = _parseHoursStr(th);
       if (!isNaN(parsedHrs) && parsedHrs > 0) {
         var off = officeMap[eid];
-        var fullDayThreshHrs = off ? off.expectedHrs * 0.65 : hdThresh;
+        var fullDayThreshHrs = off ? off.expectedHrs * 0.75 : hdThresh;
         st = parsedHrs >= fullDayThreshHrs ? 'P' : 'HD';
       }
     }
@@ -5476,7 +5539,7 @@ function _readAttendanceFiltered(from, to, deptFlt, empFlt, statusFlt, deptMap, 
       var parsedHrs = _parseHoursStr(hoursVal);
       if (!isNaN(parsedHrs) && parsedHrs > 0) {
         var off = officeMap[eid];
-        var expHrs = off ? off.expectedHrs : (hdThresh / 0.65);
+        var expHrs = off ? off.expectedHrs : (hdThresh / 0.75);
         var fullDayThreshHrs = expHrs * 0.75;
         var halfDayThreshHrs = expHrs * 0.40;
         if (parsedHrs >= fullDayThreshHrs) { st = 'P'; }
@@ -7108,7 +7171,7 @@ function recordCheckOut(deviceTimestamp, passedUser) {
             if (offIn && offOut) {
               var expHrs = _hoursBetween(offIn, offOut);
               if (!isNaN(expHrs) && expHrs >= 3 && expHrs <= 14) {
-                fullDayThresh = expHrs * 0.65;
+                fullDayThresh = expHrs * 0.75;
               }
             }
             break;
@@ -8248,4 +8311,85 @@ function runPerfProfile() {
   T('SpreadsheetApp', function () { var s = SpreadsheetApp.openById(NEW_ATTENDANCE_SHEET_ID).getSheetByName('Daily-Attendance'); return s.getDataRange().getValues(); });
 
   console.log('\nDONE. CACHE HIT=fast(<10ms) | SHEET READ=slow(200-2000ms)');
+}
+
+
+/**
+ * After office hours: if checked-in but no check-out → mark Half Day.
+ * Run via time-driven trigger every 30–60 min (e.g. 6 PM – 11 PM IST).
+ * Also safe to call manually from Script Editor.
+ */
+function autoMarkMissedCheckOuts() {
+  var today = getISTDate();
+  var nowHm = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'HH:mm');
+  var nowMins = _hmToMins(nowHm);
+  if (isNaN(nowMins)) return { success: false, error: 'bad_time' };
+
+  var doers = getSheetData(MASTER_SHEET_ID, 'Doer List');
+  var officeOutMap = {}; // empId -> 'HH:mm'
+  doers.forEach(function (d) {
+    var id = String(d['Emp ID'] || '').trim();
+    if (!id) return;
+    var oo = _extractTimeStr(d['Office OUT']);
+    if (oo) officeOutMap[id] = oo;
+  });
+  var defaultOut = getConfig('WORK_END_TIME', '18:00') || '18:00';
+
+  var ss = _getSpreadsheet(NEW_ATTENDANCE_SHEET_ID);
+  var sh = ss.getSheetByName('Daily-Attendance');
+  if (!sh || sh.getLastRow() < 2) return { success: true, updated: 0 };
+
+  var data = sh.getDataRange().getValues();
+  var hdrs = data[0].map(function (h) { return String(h || '').trim(); });
+  var iEmp = hdrs.indexOf('emp_id');
+  var iDate = hdrs.indexOf('date');
+  var iIn = hdrs.indexOf('check_in');
+  var iOut = hdrs.indexOf('check_out');
+  var iSt = hdrs.indexOf('status');
+  var iTh = hdrs.indexOf('total_hours');
+  if (iEmp < 0 || iDate < 0 || iIn < 0 || iOut < 0) {
+    return { success: false, error: 'missing_cols' };
+  }
+
+  var updated = 0;
+  for (var i = 1; i < data.length; i++) {
+    var rowDate = _normDateSafe(data[i][iDate]);
+    if (rowDate !== today) continue;
+
+    var eid = String(data[i][iEmp] || '').trim();
+    var ci = _extractTimeStr(data[i][iIn]);
+    var co = _extractTimeStr(data[i][iOut]);
+    if (!ci || ci === '-') continue;          // never checked in
+    if (co && co !== '-') continue;           // already checked out
+
+    var officeOut = officeOutMap[eid] || defaultOut;
+    var outMins = _hmToMins(officeOut);
+    // Only after office end (+ 15 min grace)
+    if (isNaN(outMins) || nowMins < outMins + 15) continue;
+
+    if (iSt >= 0) {
+      sh.getRange(i + 1, iSt + 1).setNumberFormat('@').setValue('Half Day');
+    }
+    // Optional: leave check_out blank; total_hours stay '-'
+    // Mark reason in total_hours if empty — soft signal for reports
+    if (iTh >= 0) {
+      var th = String(data[i][iTh] || '').trim();
+      if (!th || th === '-') {
+        sh.getRange(i + 1, iTh + 1).setNumberFormat('@').setValue('No checkout');
+      }
+    }
+    updated++;
+  }
+
+  if (updated > 0) {
+    try { _clearSheetCache(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance'); } catch (e) {}
+  }
+  Logger.log('[autoMarkMissedCheckOuts] updated=' + updated);
+  return { success: true, updated: updated, date: today };
+}
+
+function _hmToMins(hm) {
+  if (!hm || String(hm).indexOf(':') < 0) return NaN;
+  var p = String(hm).split(':');
+  return parseInt(p[0], 10) * 60 + parseInt(p[1], 10);
 }
