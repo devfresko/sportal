@@ -15728,17 +15728,48 @@
 
     function _dComplete(btn) {
       var tid = btn.getAttribute('data-tid');
-      _openModal('<i class="fas fa-check-circle" style="color:var(--G)"></i> Mark as Completed',
-        '<p style="font-size:14px;color:var(--tx2);line-height:1.6">Confirm that you have completed this task?</p>',
+      _openModal(
+        '<i class="fas fa-check-circle" style="color:var(--G)"></i> Mark as Completed',
+        '<p style="font-size:14px;color:var(--tx2);line-height:1.6;margin-bottom:12px">Confirm task complete. Optional remark:</p>' +
+        '<textarea id="delRemarkEl" rows="3" placeholder="Optional remark..." style="width:100%;padding:9px 12px;border:1.5px solid var(--bdr);border-radius:8px;font-size:13px;background:var(--bg);color:var(--tx);outline:none;resize:vertical;font-family:inherit"></textarea>',
         function () {
+          var remark = ((document.getElementById('delRemarkEl') || {}).value || '').trim();
           _closeModal();
-          _gas('updateDelegationStatus', [tid, 'Completed'], function () {
+          _gas('updateDelegationStatus', [tid, 'Completed', remark], function () {
             _toast('Marked as Completed!', 'ok');
             _addNtf('Delegation marked complete', 'fa-check-circle', 'var(--Gl)', 'var(--G)');
             _loadDMine();
           }, function (e) {_toast('Error: ' + e.message, 'err');});
-        }, '<i class="fas fa-check"></i> Complete');
+        },
+        '<i class="fas fa-check"></i> Complete'
+      );
     }
+
+    function _dReopen(btn) {
+      var tid = btn.getAttribute('data-tid');
+      _openModal(
+        '<i class="fas fa-rotate-left" style="color:var(--O)"></i> Reopen Task',
+        '<p style="font-size:14px;color:var(--tx2);line-height:1.6">Status wapas <b>Pending</b> ho jayega. Sirf aaj complete kiye tasks ke liye allowed hai.</p>' +
+        '<textarea id="delRemarkEl" rows="2" placeholder="Optional reason..." style="width:100%;padding:9px 12px;border:1.5px solid var(--bdr);border-radius:8px;font-size:13px;background:var(--bg);color:var(--tx);outline:none;resize:vertical;font-family:inherit;margin-top:10px"></textarea>',
+        function () {
+          var remark = ((document.getElementById('delRemarkEl') || {}).value || '').trim();
+          _closeModal();
+          _gas('updateDelegationStatus', [tid, 'Pending', remark], function () {
+            _toast('Task reopened (Pending)', 'ok');
+            _loadDMine();
+          }, function (e) {
+            var msg = (e && e.message) ? e.message : 'Error';
+            if (msg.indexOf('DONE_LOCKED') > -1) {
+              _toast('⚠️ Sirf aaj complete kiye tasks reopen ho sakte hain', 'warn');
+            } else {
+              _toast('❌ ' + msg, 'err');
+            }
+          });
+        },
+        '<i class="fas fa-rotate-left"></i> Reopen'
+      );
+    }
+
     function _dCancel(btn) {
       var tid = btn.getAttribute('data-tid');
       _openModal('<i class="fas fa-times" style="color:var(--R)"></i> Cancel Delegation',
@@ -16849,75 +16880,85 @@
       }, function (e) {sumEl.innerHTML = (e && e.message && e.message.indexOf('Network') > -1) ? '<div style="text-align:center;padding:24px"><div style="font-size:28px;margin-bottom:8px">📡</div><div style="font-weight:700;color:var(--tx);margin-bottom:4px">Connection Error</div><div style="font-size:12px;color:var(--tx2);margin-bottom:12px">Server se connect nahi ho pa raha</div><button class="btn btn-sm" onclick="_forceRefresh()"><i class="fas fa-rotate-right"></i> Retry</button></div>' : '<div class="te">' + _esc(e.message) + '</div>';});
     }
 
-function _renderMyAtt(data, sumEl, tblEl, month) {
-  var s = (data && data.summary) || {};
-  sumEl.innerHTML =
-    '<div class="att-sum">' +
-    [
-      ['Full Days', 'full_days', 'var(--G)'],
-      ['Half Days', 'half_days', 'var(--O)'],
-      ['Late Days', 'late', 'var(--R)'],
-      ['Absent', 'absent', 'var(--R)'],
-      ['Holidays', 'holiday', '#4338ca'],
-      ['Week Off', 'week_off', 'var(--tx2)']
-    ].map(function (k) {
-      return '<div class="att-kpi"><div class="val" style="color:' + k[2] + '">' + (s[k[1]] || 0) + '</div><div class="lbl">' + k[0] + '</div></div>';
-    }).join('') +
-    '</div>';
+    function _renderMyAtt(data, sumEl, tblEl, month) {
+      var s = (data && data.summary) || {};
+      sumEl.innerHTML =
+        '<div class="att-sum">' +
+        [
+          ['Full Days', 'full_days', 'var(--G)'],
+          ['Half Days', 'half_days', 'var(--O)'],
+          ['Late Days', 'late', 'var(--R)'],
+          ['Absent', 'absent', 'var(--R)'],
+          ['Holidays', 'holiday', '#4338ca'],
+          ['Week Off', 'week_off', 'var(--tx2)']
+        ].map(function (k) {
+          return '<div class="att-kpi"><div class="val" style="color:' + k[2] + '">' + (s[k[1]] || 0) + '</div><div class="lbl">' + k[0] + '</div></div>';
+        }).join('') +
+        '</div>';
 
-  var recs = (data && data.records) || [];
-  if (!recs.length) {
-    tblEl.innerHTML = '<div class="te"><i class="fas fa-calendar-times"></i> No attendance records for ' + month + '</div>';
-    return;
-  }
-
-  tblEl.innerHTML =
-    '<div class="table-card"><div class="tw"><table><thead><tr>' +
-    '<th>Date</th><th>Day</th>' +
-    '<th style="color:var(--G)"><i class="fas fa-sign-in-alt"></i> Punch IN</th>' +
-    '<th style="color:var(--R)"><i class="fas fa-sign-out-alt"></i> Punch OUT</th>' +
-    '<th>Hours</th><th>Status</th><th>Punctuality</th>' +
-    '</tr></thead><tbody>' +
-    recs.map(function (r) {
-      var stBg = (r.status === 'Present') ? 'var(--Gl)'
-        : (r.status === 'Absent') ? 'var(--Rl)'
-        : (r.status === 'Half Day') ? 'var(--Ol)'
-        : (r.status === 'Holiday') ? '#e0e7ff'
-        : 'var(--sur2)';
-      var stClr = (r.status === 'Present') ? 'var(--G)'
-        : (r.status === 'Absent') ? 'var(--R)'
-        : (r.status === 'Half Day') ? 'var(--O)'
-        : (r.status === 'Holiday') ? '#4338ca'
-        : 'var(--tx2)';
-      var ciTxt = (!r.check_in || r.check_in === '-' || r.punch_in === '-') ? '—' : _esc(r.check_in || r.punch_in || '—');
-      var coTxt = (!r.check_out || r.check_out === '-' || r.punch_out === '-') ? '—' : _esc(r.check_out || r.punch_out || '—');
-
-      var punctHtml = '<span style="color:var(--tx3)">—</span>';
-      if (r.is_late) {
-        punctHtml =
-          '<span style="display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:var(--Rl);color:var(--R);white-space:nowrap">' +
-          '<i class="fas fa-clock"></i> Late</span>' +
-          (r.office_in
-            ? '<div style="font-size:9px;color:var(--tx3);margin-top:2px">Office IN: ' + _esc(r.office_in) + '</div>'
-            : '');
-      } else if (r.check_in && r.check_in !== '-' && (r.status === 'Present' || r.status === 'Half Day')) {
-        punctHtml =
-          '<span style="display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:var(--Gl);color:var(--G);white-space:nowrap">' +
-          '<i class="fas fa-check"></i> On Time</span>';
+      var recs = (data && data.records) || [];
+      if (!recs.length) {
+        tblEl.innerHTML = '<div class="te"><i class="fas fa-calendar-times"></i> No attendance records for ' + month + '</div>';
+        return;
       }
 
-      return '<tr>' +
-        '<td style="font-weight:700">' + _fmtDate(r.date) + '</td>' +
-        '<td style="color:var(--tx2);font-weight:600">' + _esc(r.day || r.day_name || '') + '</td>' +
-        '<td style="font-weight:700;color:var(--G)">' + ciTxt + '</td>' +
-        '<td style="font-weight:700;color:var(--R)">' + coTxt + '</td>' +
-        '<td style="color:var(--P);font-weight:800">' + _cleanHours(r.total_hours) + '</td>' +
-        '<td><span style="display:inline-flex;align-items:center;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:' + stBg + ';color:' + stClr + ';white-space:nowrap">' + _esc(r.status || '—') + '</span></td>' +
-        '<td>' + punctHtml + '</td>' +
-        '</tr>';
-    }).join('') +
-    '</tbody></table></div></div>';
-}
+      tblEl.innerHTML =
+        '<div class="table-card"><div class="tw"><table><thead><tr>' +
+        '<th>Date</th><th>Day</th>' +
+        '<th style="color:var(--G)"><i class="fas fa-sign-in-alt"></i> Punch IN</th>' +
+        '<th style="color:var(--R)"><i class="fas fa-sign-out-alt"></i> Punch OUT</th>' +
+        '<th>Hours</th><th>Status</th><th>Punctuality</th>' +
+        '</tr></thead><tbody>' +
+        recs.map(function (r) {
+          var stBg = (r.status === 'Present') ? 'var(--Gl)'
+            : (r.status === 'Absent') ? 'var(--Rl)'
+              : (r.status === 'Half Day') ? 'var(--Ol)'
+                : (r.status === 'Holiday') ? '#e0e7ff'
+                  : 'var(--sur2)';
+          var stClr = (r.status === 'Present') ? 'var(--G)'
+            : (r.status === 'Absent') ? 'var(--R)'
+              : (r.status === 'Half Day') ? 'var(--O)'
+                : (r.status === 'Holiday') ? '#4338ca'
+                  : 'var(--tx2)';
+
+          var ciTxt = (!r.check_in || r.check_in === '-' || r.punch_in === '-')
+            ? '—' : _esc(r.check_in || r.punch_in || '—');
+          var coTxt = (!r.check_out || r.check_out === '-' || r.punch_out === '-')
+            ? '—' : _esc(r.check_out || r.punch_out || '—');
+
+          var punctHtml = '<span style="color:var(--tx3)">—</span>';
+          if (r.is_late) {
+            punctHtml =
+              '<span style="display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:var(--Rl);color:var(--R);white-space:nowrap">' +
+              '<i class="fas fa-clock"></i> Late</span>' +
+              (r.office_in
+                ? '<div style="font-size:9px;color:var(--tx3);margin-top:2px">Office IN: ' + _esc(r.office_in) + '</div>'
+                : '');
+          } else if (r.check_in && r.check_in !== '-' && (r.status === 'Present' || r.status === 'Half Day')) {
+            punctHtml =
+              '<span style="display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:var(--Gl);color:var(--G);white-space:nowrap">' +
+              '<i class="fas fa-check"></i> On Time</span>';
+          }
+
+          var statusHtml =
+            '<span style="display:inline-flex;align-items:center;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:' +
+            stBg + ';color:' + stClr + ';white-space:nowrap">' + _esc(r.status || '—') + '</span>' +
+            (r.half_day_reason
+              ? '<div style="font-size:9px;color:var(--tx3);margin-top:2px">' + _esc(r.half_day_reason) + '</div>'
+              : '');
+
+          return '<tr>' +
+            '<td style="font-weight:700">' + _fmtDate(r.date) + '</td>' +
+            '<td style="color:var(--tx2);font-weight:600">' + _esc(r.day || r.day_name || '') + '</td>' +
+            '<td style="font-weight:700;color:var(--G)">' + ciTxt + '</td>' +
+            '<td style="font-weight:700;color:var(--R)">' + coTxt + '</td>' +
+            '<td style="color:var(--P);font-weight:800">' + _cleanHours(r.total_hours) + '</td>' +
+            '<td>' + statusHtml + '</td>' +
+            '<td>' + punctHtml + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table></div></div>';
+    }
 
 
     function _exportAtt() {
