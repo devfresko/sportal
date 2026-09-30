@@ -2741,15 +2741,19 @@ function getMyAttendance(empId, monthYear, passedUser) {
   var empCode = empId || _myCode(user);
   if (empCode !== _myCode(user) && !isManager(user)) throw new Error('PERMISSION_DENIED');
 
-  // Load Doer List to get per-employee Office IN/OUT for status re-derivation
+  // Thresholds + office hours for late check
   var hdThresh = _cfgNum('HALF_DAY_THRESHOLD_HRS', 6.0);
   var fullDayThreshHrs = hdThresh;
+  var officeIn = getConfig('WORK_START_TIME', '10:00') || '10:00';
+  var lateThresh = parseInt(getConfig('LATE_THRESHOLD_MINS', '15'), 10) || 15;
+
   try {
     var doers = getSheetData(MASTER_SHEET_ID, 'Doer List');
     for (var di = 0; di < doers.length; di++) {
       if (String(doers[di]['Emp ID'] || '').trim() === empCode) {
         var offIn = _extractTimeStr(doers[di]['Office IN']);
         var offOut = _extractTimeStr(doers[di]['Office OUT']);
+        if (offIn) officeIn = offIn;
         if (offIn && offOut) {
           var expHrs = _hoursBetween(offIn, offOut);
           if (!isNaN(expHrs) && expHrs >= 3 && expHrs <= 14) {
@@ -2759,9 +2763,11 @@ function getMyAttendance(empId, monthYear, passedUser) {
         break;
       }
     }
-  } catch (eDl) { console.warn('[getMyAttendance] Doer List read: ' + eDl.message); }
+  } catch (eDl) {
+    console.warn('[getMyAttendance] Doer List read: ' + eDl.message);
+  }
 
-  // Read from Daily-Attendance (portal check-in/out sheet)
+  // Read from Daily-Attendance
   var daily = getSheetData(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance');
   var recs = daily.filter(function (a) {
     if (String(a['emp_id'] || '') !== String(empCode)) return false;
@@ -2773,15 +2779,21 @@ function getMyAttendance(empId, monthYear, passedUser) {
     return _normDateSafe(b['date'] || '').localeCompare(_normDateSafe(a['date'] || ''));
   });
 
-  var sum = { full_days: 0, half_days: 0, absent: 0, holiday: 0, week_off: 0 };
+  var sum = {
+    full_days: 0,
+    half_days: 0,
+    absent: 0,
+    holiday: 0,
+    week_off: 0,
+    late: 0
+  };
 
   var records = recs.map(function (r) {
-    // ✅ Single helper — device_ts preferred, display-safe times
     var times = _attTimesFromRow(r);
     var ci = times.check_in;
     var co = times.check_out;
 
-    // Recalculate total hours from actual check_in/check_out times
+    // Recalculate total hours from punch times
     var calculatedHours = '-';
     var calculatedHrsNum = 0;
     if (ci && ci !== '-' && co && co !== '-') {
@@ -2813,7 +2825,7 @@ function getMyAttendance(empId, monthYear, passedUser) {
       }
     }
 
-    // Derive final status using per-employee Doer List threshold
+    // Status
     var rawStatus = String(r['status'] || '').trim();
     var st = _normAttStatus(rawStatus);
     if ((st === 'P' || st === 'HD') && calculatedHrsNum > 0) {
@@ -2827,6 +2839,13 @@ function getMyAttendance(empId, monthYear, passedUser) {
       : st === 'H' ? 'Holiday'
       : st === 'WO' ? 'Week Off'
       : (rawStatus || '-');
+
+    // Late = punch IN after Office IN + threshold (Present / Half Day only)
+    var isLate = false;
+    if ((st === 'P' || st === 'HD') && ci && ci !== '-') {
+      isLate = _isLateCheckIn(ci, officeIn, lateThresh);
+      if (isLate) sum.late++;
+    }
 
     if (st === 'P') sum.full_days++;
     else if (st === 'HD') sum.half_days++;
@@ -2846,7 +2865,9 @@ function getMyAttendance(empId, monthYear, passedUser) {
       check_in: ci,
       check_out: co,
       break_hours: '-',
-      status: statusLabel
+      status: statusLabel,
+      is_late: isLate,
+      office_in: officeIn
     };
   });
 
