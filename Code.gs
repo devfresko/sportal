@@ -2999,10 +2999,9 @@ function getMusterGrid(dept, monthYear, passedUser) {
   if (!isManager(user)) throw new Error('PERMISSION_DENIED');
 
   var month = monthYear || Utilities.formatDate(new Date(), _getTimezone(), 'yyyy-MM');
-  var yr = parseInt(month.split('-')[0]);
-  var mo = parseInt(month.split('-')[1]) - 1; // 0-based
+  var yr = parseInt(month.split('-')[0], 10);
+  var mo = parseInt(month.split('-')[1], 10) - 1;
 
-  // All days in month
   var daysInMonth = new Date(yr, mo + 1, 0).getDate();
   var allDates = [];
   for (var d = 1; d <= daysInMonth; d++) {
@@ -3011,7 +3010,6 @@ function getMusterGrid(dept, monthYear, passedUser) {
     allDates.push(yr + '-' + mm + '-' + dd);
   }
 
-  // Holidays set
   var holSet = {};
   try {
     getSheetData(MASTER_SHEET_ID, 'Holiday List').forEach(function (h) {
@@ -3020,74 +3018,53 @@ function getMusterGrid(dept, monthYear, passedUser) {
     });
   } catch (e) { }
 
-  // Build per-employee shift-hours map from Doer List for status re-derivation
   var doers = getSheetData(MASTER_SHEET_ID, 'Doer List');
   var officeMap = _buildOfficeHoursMap(doers);
   var hdThresh = _cfgNum('HALF_DAY_THRESHOLD_HRS', 6.0);
 
-  // NeedAttendance=No employees are excluded from ALL muster views
   var needAttSet = {};
+  var weekOffDayMapMuster = {};
   doers.forEach(function (d) {
     var id = String(d['Emp ID'] || '').trim();
     if (!id) return;
     var na = String(d['NeedAttendance'] || '').trim().toLowerCase();
     needAttSet[id] = (na !== 'no');
+    weekOffDayMapMuster[id] = _parseWeekOffDay(d['Week Off Day']);
   });
 
-  // Build per-employee week off day map
-  var weekOffDayMapMuster = {};
-  doers.forEach(function (d) {
-    var id = String(d['Emp ID'] || '').trim();
-    if (!id) return;
-    var wod = d['Week Off Day'];
-    var weekOffDay = 0; // default Sunday
-    if (wod !== undefined && wod !== null && wod !== '') {
-      var wodStr = String(wod).trim().toLowerCase();
-      var dmap = { sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tuesday: 2, wed: 3, wednesday: 3, thu: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6 };
-      if (dmap[wodStr] !== undefined) weekOffDay = dmap[wodStr];
-      else { var wn = parseInt(wodStr, 10); if (!isNaN(wn) && wn >= 0 && wn <= 6) weekOffDay = wn; }
-    }
-    weekOffDayMapMuster[id] = weekOffDay;
-  });
-
-  // Read attendance — skip NeedAttendance=No employees upfront
   var att = getSheetData(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance').filter(function (a) {
     var eid = String(a['emp_id'] || '').trim();
-    if (needAttSet.hasOwnProperty(eid) && !needAttSet[eid]) return false; // NeedAttendance=No
+    if (needAttSet.hasOwnProperty(eid) && !needAttSet[eid]) return false;
     var ok = _normDateSafe(a['date'] || '').substring(0, 7) === month;
     if (dept && dept !== 'All') ok = ok && String(a['dept'] || '') === dept;
     return ok;
   });
 
-  // Build emp map with per-day status
   var empMap = {};
   att.forEach(function (a) {
     var eid = String(a['emp_id'] || '').trim();
     if (!eid) return;
     var dt = _normDateSafe(a['date'] || '');
     if (!dt) return;
+
     if (!empMap[eid]) {
-      empMap[eid] = { emp_id: eid, emp_name: String(a['emp_name'] || ''), dept: String(a['dept'] || '') };
-      // Pre-fill all dates — use employee's own weekly off day, default Sunday
+      empMap[eid] = {
+        emp_id: eid,
+        emp_name: String(a['emp_name'] || ''),
+        dept: String(a['dept'] || '')
+      };
+      var empWOD0 = weekOffDayMapMuster.hasOwnProperty(eid) ? weekOffDayMapMuster[eid] : 0;
       allDates.forEach(function (date) {
-        var dow = new Date(date + 'T00:00:00').getDay();
-        var empWOD = weekOffDayMapMuster.hasOwnProperty(eid) ? weekOffDayMapMuster[eid] : 0;
-        empMap[eid][date] = dow === empWOD ? 'WO' : (holSet[date] ? 'H' : '');
+        var dow = _dowFromYmd(date);
+        empMap[eid][date] = (dow === empWOD0) ? 'WO' : (holSet[date] ? 'H' : '');
       });
     }
+
     var s = String(a['status'] || '').trim();
     var ci = String(a['check_in'] || '').trim();
     var th = String(a['total_hours'] || '').trim();
-
-    // Use _normAttStatus to handle all status string variants including
-    // 'Half Day' (the string recordCheckOut actually writes) — the old code
-    // only matched 'HD', so any Half Day record showed as blank in the grid.
     var st = _normAttStatus(s);
 
-    // Re-derive Present/Half Day from actual worked hours whenever available,
-    // using the same per-employee Office IN/OUT threshold as _readAttendanceFiltered.
-    // This corrects any historical records that were written with the wrong
-    // status (e.g. old threshold of 8.5h marking 7h workers as Half Day).
     if ((st === 'P' || st === 'HD') && th && th !== '-') {
       var parsedHrs = _parseHoursStr(th);
       if (!isNaN(parsedHrs) && parsedHrs > 0) {
@@ -3097,32 +3074,65 @@ function getMusterGrid(dept, monthYear, passedUser) {
       }
     }
 
-    // Final fallback: if status is still unresolved and employee had a check-in, mark Present
     if (!st || st === 'A') {
       if (ci && ci !== '-' && !s) st = 'P';
     }
 
-    if (st) empMap[eid][dt] = st;
+    // CRITICAL: Week Off / Holiday ko attendance row se overwrite mat karo
+    var existing = empMap[eid][dt];
+    if (existing === 'WO' || existing === 'H') {
+      // keep WO / H
+    } else if (st) {
+      empMap[eid][dt] = st;
+    }
   });
 
-  // Calculate summary per employee
+  // Employees with zero attendance rows still need a row (WO/H/Absent grid)
+  doers.forEach(function (d) {
+    var eid = String(d['Emp ID'] || '').trim();
+    if (!eid) return;
+    if (needAttSet.hasOwnProperty(eid) && !needAttSet[eid]) return;
+    if (dept && dept !== 'All' && String(d['Department'] || '') !== dept) return;
+    if (empMap[eid]) return;
+    empMap[eid] = {
+      emp_id: eid,
+      emp_name: String(d['Name'] || ''),
+      dept: String(d['Department'] || '')
+    };
+    var empWOD0 = weekOffDayMapMuster.hasOwnProperty(eid) ? weekOffDayMapMuster[eid] : 0;
+    allDates.forEach(function (date) {
+      var dow = _dowFromYmd(date);
+      empMap[eid][date] = (dow === empWOD0) ? 'WO' : (holSet[date] ? 'H' : '');
+    });
+  });
+
   var result = Object.keys(empMap).map(function (eid) {
     var emp = empMap[eid];
     var empWOD = weekOffDayMapMuster.hasOwnProperty(eid) ? weekOffDayMapMuster[eid] : 0;
     var present = 0, absent = 0, hd = 0, wo = 0, hol = 0, working = 0;
+
     allDates.forEach(function (date) {
       var v = emp[date] || '';
-      var dow = new Date(date + 'T00:00:00').getDay();
-      var isHol = holSet[date];
-      var isWO = (dow === empWOD); // employee's own weekly off day
-      if (!isWO && !isHol) working++; // actual working day for this employee
+      var dow = _dowFromYmd(date);
+      var isHol = !!holSet[date];
+      var isWO = (dow === empWOD);
+
+      // Force correct status on WO / Holiday
+      if (isWO) v = 'WO';
+      else if (isHol && (v === '' || v === 'A')) v = 'H';
+
+      if (!isWO && !isHol) working++;
+
       if (v === 'P') present++;
       else if (v === 'HD') hd++;
       else if (v === 'A') absent++;
       else if (v === 'WO') wo++;
       else if (v === 'H') hol++;
-      else if (!isWO && !isHol && v === '') absent++; // no record on working day = absent
+      else if (!isWO && !isHol && v === '') absent++;
+
+      emp[date] = v || emp[date] || '';
     });
+
     var pct = working > 0 ? Math.round((present + hd * 0.5) / working * 100) : 0;
     emp.days_present = present;
     emp.days_hd = hd;
@@ -3135,13 +3145,11 @@ function getMusterGrid(dept, monthYear, passedUser) {
   });
 
   result.sort(function (a, b) { return a.emp_name.localeCompare(b.emp_name); });
-  // Final filter: remove any NeedAttendance=No employees who slipped through
   result = result.filter(function (r) {
     return !needAttSet.hasOwnProperty(r.emp_id) || needAttSet[r.emp_id] !== false;
   });
   return { rows: result, dates: allDates, holidays: Object.keys(holSet) };
 }
-
 // ════════════════════════════════════════════════════════════════════════════
 // CHECKLIST ANALYTICS — per-employee task completion stats
 // Returns workload distribution, freq breakdown, trend, top/bottom performers
@@ -7550,6 +7558,7 @@ function updatePayrollStatus(payrollId, status, passedUser) {
 //   Basic Salary, HRA, Conveyance, Other Allowances, PF Deduction,
 //   ESI Deduction, TDS, Other Deductions
 // ════════════════════════════════════════════════════════════════════════════
+
 function getPayrollSummary(monthYear, deptFlt, passedUser) {
   var user = verifyUser(passedUser);
   if (!user) throw new Error('NOT_AUTHENTICATED');
@@ -7557,10 +7566,9 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
 
   var today = getISTDate();
   var month = monthYear || today.substring(0, 7);
-  var yr = parseInt(month.split('-')[0]);
-  var mo = parseInt(month.split('-')[1]) - 1;
+  var yr = parseInt(month.split('-')[0], 10);
+  var mo = parseInt(month.split('-')[1], 10) - 1;
 
-  // All dates in month
   var daysInMonth = new Date(yr, mo + 1, 0).getDate();
   var allDates = [];
   for (var d = 1; d <= daysInMonth; d++) {
@@ -7569,7 +7577,6 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
     allDates.push(yr + '-' + mm + '-' + dd);
   }
 
-  // Holidays
   var holSet = {};
   try {
     getSheetData(MASTER_SHEET_ID, 'Holiday List').forEach(function (h) {
@@ -7578,22 +7585,15 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
     });
   } catch (e) { }
 
-  // Doer List — salary components + week off day
   var doers = getSheetData(MASTER_SHEET_ID, 'Doer List');
 
-  // DEBUG: Log actual column headers so we can see what names exist
-  if (doers.length > 0) {
-    var sampleKeys = Object.keys(doers[0]);
-    console.log('[getPayrollSummary] Doer List columns: ' + sampleKeys.join(', '));
-  }
-
-  var doerMap = {}; // emp_id -> doer row with salary info
+  var doerMap = {};
   var weekOffDayMap = {};
   doers.forEach(function (d) {
     var id = String(d['Emp ID'] || '').trim();
     if (!id) return;
     var na = String(d['NeedAttendance'] || '').trim().toLowerCase();
-    if (na === 'no') return; // skip non-attendance employees
+    if (na === 'no') return;
     if (deptFlt && deptFlt !== 'all' && String(d['Department'] || '') !== deptFlt) return;
 
     doerMap[id] = {
@@ -7603,7 +7603,6 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       role: String(d['Role'] || 'STAFF'),
       photo: String(d['PHOTO'] || ''),
       phone: String(d['Phone'] || d['Mobile'] || ''),
-      // Salary — try many column name variations Kunal may have used
       basic_salary: Number(d['Basic Salary'] || d['Basic'] || d['basic_salary'] || d['Salary'] || d['basic'] || d['BASIC'] || 0),
       hra: Number(d['HRA'] || d['H.R.A'] || d['hra'] || d['House Rent'] || d['HRA Amt'] || 0),
       conveyance: Number(d['Conveyance'] || d['Conv'] || d['conveyance'] || d['Travel'] || d['TA'] || d['Conv Allowance'] || 0),
@@ -7616,20 +7615,10 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       office_out: String(d['Office OUT'] || '').trim()
     };
 
-    // Week off day
-    var wod = d['Week Off Day'];
-    var weekOffDay = 0;
-    if (wod !== undefined && wod !== null && wod !== '') {
-      var wodStr = String(wod).trim().toLowerCase();
-      var dmap = { sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tuesday: 2, wed: 3, wednesday: 3, thu: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6 };
-      if (dmap[wodStr] !== undefined) weekOffDay = dmap[wodStr];
-      else { var wn = parseInt(wodStr, 10); if (!isNaN(wn) && wn >= 0 && wn <= 6) weekOffDay = wn; }
-    }
-    weekOffDayMap[id] = weekOffDay;
+    weekOffDayMap[id] = _parseWeekOffDay(d['Week Off Day']);
   });
 
-  // Approved leaves in this month
-  var leaveSet = {}; // emp_id -> { date -> leave_type }
+  var leaveSet = {};
   try {
     getSheetData(NEW_ATTENDANCE_SHEET_ID, 'leave_requests').forEach(function (l) {
       if (String(l['status'] || '').trim() !== 'Approved') return;
@@ -7639,19 +7628,19 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       var td = _normDateSafe(l['to_date'] || '');
       if (!eid || !fd || !td) return;
       if (!leaveSet[eid]) leaveSet[eid] = {};
-      // Expand leave range into individual dates
-      var cur = new Date(fd + 'T00:00:00');
-      var end = new Date(td + 'T00:00:00');
+      var cur = new Date(parseInt(fd.substring(0, 4), 10), parseInt(fd.substring(5, 7), 10) - 1, parseInt(fd.substring(8, 10), 10));
+      var end = new Date(parseInt(td.substring(0, 4), 10), parseInt(td.substring(5, 7), 10) - 1, parseInt(td.substring(8, 10), 10));
       while (cur <= end) {
         var ds = Utilities.formatDate(cur, 'Asia/Kolkata', 'yyyy-MM-dd');
         if (ds.substring(0, 7) === month) leaveSet[eid][ds] = lt;
         cur.setDate(cur.getDate() + 1);
       }
     });
-  } catch (e) { console.warn('[getPayrollSummary] leave_requests: ' + e.message); }
+  } catch (e) {
+    console.warn('[getPayrollSummary] leave_requests: ' + e.message);
+  }
 
-  // Attendance records this month
-  var attSet = {}; // emp_id -> { date -> { status, in, out } }
+  var attSet = {};
   try {
     getSheetData(NEW_ATTENDANCE_SHEET_ID, 'Daily-Attendance').forEach(function (a) {
       var eid = String(a['emp_id'] || '').trim();
@@ -7659,7 +7648,6 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       if (!eid || !dt || dt.substring(0, 7) !== month) return;
       if (!attSet[eid]) attSet[eid] = {};
       var s = _normAttStatus(String(a['status'] || ''));
-      // Normalise check_in/check_out — could be Date object or string
       var ci = a['check_in'] instanceof Date
         ? Utilities.formatDate(a['check_in'], 'Asia/Kolkata', 'HH:mm')
         : String(a['check_in'] || '').trim();
@@ -7669,35 +7657,51 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       var th = String(a['total_hours'] || '').trim();
       attSet[eid][dt] = { status: s || 'P', in: ci, out: co, hours: th };
     });
-  } catch (e) { console.warn('[getPayrollSummary] attendance: ' + e.message); }
+  } catch (e) {
+    console.warn('[getPayrollSummary] attendance: ' + e.message);
+  }
 
-  // Compute per-employee payroll
   var results = Object.keys(doerMap).map(function (eid) {
     var doer = doerMap[eid];
     var empWOD = weekOffDayMap.hasOwnProperty(eid) ? weekOffDayMap[eid] : 0;
     var empAtt = attSet[eid] || {};
     var empLeave = leaveSet[eid] || {};
 
-    // Working day calculation
-    var totalWorkingDays = 0; // payable days (excl. WO & holidays)
-    var presentDays = 0; // P = 1, HD = 0.5
-    var absentDays = 0; // no record on working day (LWP)
-    var leaveDays = 0; // approved paid leave (CL/SL/PL)
-    var lwpDays = 0; // Leave Without Pay
+    var totalWorkingDays = 0;
+    var presentDays = 0;
+    var absentDays = 0;
+    var leaveDays = 0;
+    var lwpDays = 0;
     var holidayDays = 0;
     var weekOffDays = 0;
     var dailyLog = [];
 
     allDates.forEach(function (date) {
-      var dow = new Date(date + 'T00:00:00').getDay();
+      var dow = _dowFromYmd(date);
       var isWO = (dow === empWOD);
       var isHol = !!holSet[date];
 
-      if (isWO) { weekOffDays++; dailyLog.push({ date: date, status: 'WO', in: '', out: '', hours: '' }); return; }
-      if (isHol) { holidayDays++; dailyLog.push({ date: date, status: 'H', in: '', out: '', hours: '' }); return; }
+      // Week Off / Holiday ALWAYS win over sheet Absent
+      if (isWO) {
+        weekOffDays++;
+        var woAtt = empAtt[date] || null;
+        dailyLog.push({
+          date: date,
+          status: 'WO',
+          value: 0,
+          in: woAtt ? (woAtt.in || '') : '',
+          out: woAtt ? (woAtt.out || '') : '',
+          hours: woAtt ? (woAtt.hours || '') : ''
+        });
+        return;
+      }
+      if (isHol) {
+        holidayDays++;
+        dailyLog.push({ date: date, status: 'H', value: 0, in: '', out: '', hours: '' });
+        return;
+      }
 
       totalWorkingDays++;
-      // attSet now stores object with status/in/out/hours
       var attRec = empAtt[date] || null;
       var attSt = attRec ? attRec.status : '';
       var punchIn = attRec ? (attRec.in || '') : '';
@@ -7705,19 +7709,16 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       var punchHrs = attRec ? (attRec.hours || '') : '';
       var leaveType = empLeave[date] || '';
 
-      // Re-derive P/HD using 3-tier logic if we have actual punch times
       if (attRec && punchIn && punchOut && punchIn !== '-' && punchOut !== '-') {
         try {
           var ciP2 = punchIn.split(':'), coP2 = punchOut.split(':');
-          var diffM = (parseInt(coP2[0]) * 60 + parseInt(coP2[1])) - (parseInt(ciP2[0]) * 60 + parseInt(ciP2[1]));
+          var diffM = (parseInt(coP2[0], 10) * 60 + parseInt(coP2[1], 10)) -
+                      (parseInt(ciP2[0], 10) * 60 + parseInt(ciP2[1], 10));
           if (diffM > 0) {
             var workedH = diffM / 60;
-            var offMap2 = weekOffDayMap;  // reuse existing weekOffDayMap variable
-            // Get expected hours from doerMap
             var expH = doer.office_in && doer.office_out ? _hoursBetween(doer.office_in, doer.office_out) : 8;
             if (isNaN(expH) || expH < 3 || expH > 14) expH = 8;
-            if (workedH >= expH * 0.75) attSt = 'P';
-            else attSt = 'HD';
+            attSt = (workedH >= expH * 0.75) ? 'P' : 'HD';
           }
         } catch (eHD) { }
       }
@@ -7738,15 +7739,20 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       }
 
       dailyLog.push({
-        date: date, status: dayStatus, value: dayValue,
-        in: punchIn, out: punchOut, hours: punchHrs
+        date: date,
+        status: dayStatus,
+        value: dayValue,
+        in: punchIn,
+        out: punchOut,
+        hours: punchHrs
       });
     });
 
-    // Payable days = present + paid leaves
     var payableDays = presentDays + leaveDays;
-    var deductDays = absentDays + lwpDays; // LWP deduction
-    var perDaySalary = totalWorkingDays > 0 ? (doer.basic_salary + doer.hra + doer.conveyance + doer.other_allowances) / totalWorkingDays : 0;
+    var deductDays = absentDays + lwpDays;
+    var perDaySalary = totalWorkingDays > 0
+      ? (doer.basic_salary + doer.hra + doer.conveyance + doer.other_allowances) / totalWorkingDays
+      : 0;
     var lwpDeduction = Math.round(perDaySalary * deductDays);
 
     var gross = doer.basic_salary + doer.hra + doer.conveyance + doer.other_allowances;
@@ -7760,7 +7766,6 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       role: doer.role,
       photo: doer.photo,
       phone: doer.phone,
-      // Salary components (from Doer List)
       basic_salary: doer.basic_salary,
       hra: doer.hra,
       conveyance: doer.conveyance,
@@ -7773,7 +7778,6 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       lwp_deduction: lwpDeduction,
       total_deductions: totalDed,
       net_salary: net,
-      // Attendance summary
       total_working_days: totalWorkingDays,
       present_days: presentDays,
       absent_days: absentDays,
@@ -7783,12 +7787,13 @@ function getPayrollSummary(monthYear, deptFlt, passedUser) {
       holiday_days: holidayDays,
       payable_days: payableDays,
       per_day_salary: Math.round(perDaySalary),
-      // Daily log for drill-down
       daily_log: dailyLog
     };
   });
 
-  results.sort(function (a, b) { return a.dept.localeCompare(b.dept) || a.emp_name.localeCompare(b.emp_name); });
+  results.sort(function (a, b) {
+    return a.dept.localeCompare(b.dept) || a.emp_name.localeCompare(b.emp_name);
+  });
 
   var grandGross = results.reduce(function (s, r) { return s + r.gross_salary; }, 0);
   var grandDed = results.reduce(function (s, r) { return s + r.total_deductions; }, 0);
@@ -8392,4 +8397,41 @@ function _hmToMins(hm) {
   if (!hm || String(hm).indexOf(':') < 0) return NaN;
   var p = String(hm).split(':');
   return parseInt(p[0], 10) * 60 + parseInt(p[1], 10);
+}
+
+
+/** Parse Doer List "Week Off Day" → 0=Sun … 6=Sat. Default Sunday. */
+function _parseWeekOffDay(wod) {
+  if (wod === undefined || wod === null || wod === '') return 0;
+  if (typeof wod === 'number' && !isNaN(wod)) {
+    var n0 = Math.round(wod);
+    if (n0 >= 0 && n0 <= 6) return n0;
+  }
+  var s = String(wod).replace(/\u00a0/g, ' ').trim().toLowerCase();
+  if (!s) return 0;
+  var dmap = {
+    sun: 0, sunday: 0,
+    mon: 1, monday: 1,
+    tue: 2, tues: 2, tuesday: 2,
+    wed: 3, wednesday: 3,
+    thu: 4, thur: 4, thurs: 4, thursday: 4,
+    fri: 5, friday: 5,
+    sat: 6, saturday: 6
+  };
+  if (dmap[s] !== undefined) return dmap[s];
+  var three = s.substring(0, 3);
+  if (dmap[three] !== undefined) return dmap[three];
+  var n = parseInt(s, 10);
+  if (!isNaN(n) && n >= 0 && n <= 6) return n;
+  return 0;
+}
+
+/** Day-of-week from yyyy-MM-dd (local calendar). 0=Sun … 6=Sat */
+function _dowFromYmd(dateStr) {
+  if (!dateStr) return -1;
+  var p = String(dateStr).substring(0, 10).split('-');
+  if (p.length < 3) return -1;
+  var y = parseInt(p[0], 10), m = parseInt(p[1], 10) - 1, d = parseInt(p[2], 10);
+  if (isNaN(y) || isNaN(m) || isNaN(d)) return -1;
+  return new Date(y, m, d).getDay();
 }
